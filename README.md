@@ -9,14 +9,12 @@ A performance-focused PSP emulator supporting local multiplayer and downloadable
 
 # Supported Devices
 ## Trimui Brick/Hammer
-1. Install Deadcast via the [NextUI](https://github.com/LoveRetro/NextUI) [Pak Store](https://github.com/LoveRetro/nextui-pak-store).
-2. Put Dreamcast roms in a `/Roms/Dreamcast (DC-DEADCAST)/` folder on your SD Card.
-3. Put the Dreamcast BIOS (`dc_boot.bin`) in the `/Emus/tg5040/DC-DEADCAST.pak/bios/` folder on your SD Card.
+1. Install Deadstation Portable via the [NextUI](https://github.com/LoveRetro/NextUI) [Pak Store](https://github.com/LoveRetro/nextui-pak-store).
+2. Put PSP games (`.iso`, `.cso`, `.chd` or `.pbp`) in a `/Roms/PlayStation Portable (PSP-DEADSTATION-PORTABLE)/` folder on your SD Card.
+3. No PSP firmware or BIOS is needed.
 
 # Credits
-- [Flycast](https://github.com/flyinghead/flycast): the emulator Deadcast is built from.
-- [dreamcomp](https://github.com/cherryduck/dreamcomp): the Dreamcast recompiler the recomp engine builds on.
-- [Rez Recompiled](https://github.com/tyrannotorus/recomp-dreamcast-rez): the port the Rez recomp module comes from.
+- [PPSSPP](https://github.com/hrydgard/ppsspp): the emulator Deadstation Portable is built from.
 
 ---
 
