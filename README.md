@@ -22,7 +22,7 @@ A performance-focused PSP emulator supporting local multiplayer and downloadable
 
 Notes for agents working on this repo. Everything above the line is the maintainer's: leave it as written.
 
-Deadstation Portable is a PSP emulator for the TrimUI Brick (NextUI, tg5040) only, as `Emus/tg5040/PSP-DEADSTATION-PORTABLE.pak`, built from [PPSSPP](https://github.com/hrydgard/ppsspp) v1.20.4 and shaped like [Deadcast](https://github.com/tyrannotorus/emulator-dreamcast-deadcast) and [Deadstation 1](https://github.com/tyrannotorus/emulator-deadstation-1). It draws with Vulkan on the Brick's PowerVR GE8300 straight to the panel through fb0, with no surface or swapchain; SDL2 reads the pad and plays the sound. A recomp module is a separate executable that it hosts: it starts the module as a child process and sleeps until MENU, and the menu, the module's options and the store stay the emulator's.
+Deadstation Portable is a PSP emulator for the TrimUI Brick (NextUI, tg5040) only, as `Emus/tg5040/PSP-DEADSTATION-PORTABLE.pak`, built from [PPSSPP](https://github.com/hrydgard/ppsspp) v1.20.4. It draws with Vulkan on the Brick's PowerVR GE8300 straight to the panel through fb0, with no surface or swapchain; SDL2 reads the pad and plays the sound. A recomp module is a separate executable that it hosts: it starts the module as a child process and sleeps until MENU, and the menu, the module's options and the store stay the emulator's.
 
 ### Layout
 
