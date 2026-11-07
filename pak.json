@@ -1,7 +1,7 @@
 {
   "name": "PSP-DEADSTATION-PORTABLE",
   "type": "EMU",
-  "description": "A PSP emulator for the TrimUI Brick.",
+  "description": "A performance-focused PSP emulator.",
   "author": "tyrannotorus",
   "repo_url": "https://github.com/tyrannotorus/emulator-deadstation-portable",
   "release_filename": "PSP-DEADSTATION-PORTABLE.pak.zip",
