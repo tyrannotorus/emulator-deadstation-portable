@@ -1,7 +1,7 @@
 {
   "name": "PSP-DEADSTATION-PORTABLE",
   "type": "EMU",
-  "description": "A performance-focused PSP emulator.",
+  "description": "A performance-focused PSP emulator supporting local multiplayer and downloadable recomp modules.",
   "author": "tyrannotorus",
   "repo_url": "https://github.com/tyrannotorus/emulator-deadstation-portable",
   "release_filename": "PSP-DEADSTATION-PORTABLE.pak.zip",

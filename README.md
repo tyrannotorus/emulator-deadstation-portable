@@ -1,5 +1,5 @@
 # Deadstation Portable
-A Sony PSP emulator targeting optimal performance on the Trimui Brick/Hammer.
+A performance-focused PSP emulator supporting local multiplayer and downloadable recomp modules.
 
 # Features
 ## Emulator
