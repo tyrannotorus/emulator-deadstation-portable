@@ -1,0 +1,18 @@
+# local tooling and notes
+/local/
+/build*/
+# game discs and anything made from them
+*.chd
+*.cue
+*.bin
+*.iso
+*.cso
+*.img
+*.pbp
+*.ecm
+*.ccd
+*.sub
+*.m3u
+*.state
+*.ppst
+__pycache__/

@@ -1,0 +1,6 @@
+[submodule "ui"]
+	path = ui
+	url = https://github.com/tyrannotorus/emulator-dead-ui-system.git
+[submodule "ffmpeg"]
+	path = ffmpeg
+	url = https://github.com/hrydgard/ppsspp-ffmpeg.git
