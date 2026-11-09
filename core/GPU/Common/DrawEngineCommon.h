@@ -160,6 +160,10 @@ public:
 	int GetNumDrawCalls() const {
 		return numDrawVerts_;
 	}
+	// (experiment) for the GE loop's ARM64 scan, which reads it without a call
+	const int *NumDrawCallsPtr() const {
+		return &numDrawVerts_;
+	}
 
 	VertexDecoder *GetVertexDecoder(u32 vertTypeID) {
 		// Asked for a lot, by the same type time after time.

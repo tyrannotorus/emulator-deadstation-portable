@@ -36,6 +36,55 @@ struct CommandInfo {
 
 static CommandInfo cmdInfo_[256];
 
+// (experiment) the command table as the ARM64 scan reads it (GeFastScanArm64.cpp): a flags byte and the dirty bits a command
+static u8 geFastFlags_[256];
+static u64 geFastDirty_[256];
+static void BuildGeFastTables() {
+	for (int i = 0; i < 256; i++) {
+		const u64 flags = cmdInfo_[i].flags;
+		geFastFlags_[i] = ((flags & FLAG_EXECUTE) ? 1 : 0) | ((flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) ? 2 : 0) | ((flags & FLAG_FLUSHBEFOREONCHANGE) ? 4 : 0);
+		geFastDirty_[i] = flags >> 8;
+	}
+}
+struct GeFastScanArgs {
+	const u8 *base;
+	u32 *cmdmem;
+	const u8 *flags;
+	const u64 *dirtyBits;
+	uint64_t *dirty;
+	const int *pending;
+};
+static_assert(sizeof(GeFastScanArgs) == 48, "GeFastScanArgs: the asm reads it at fixed offsets");
+#if PPSSPP_ARCH(ARM64)
+extern "C" int GeFastScan(const GeFastScanArgs *args, u32 *pc, int dc);
+#endif
+struct GeLoopArgs {
+	GPUCommonHW *gpu;
+	u32 *pc;
+	const u8 *base;
+	u32 *cmdmem;
+	const CommandInfo *cmdInfo;
+	const u8 *flags;
+	uint64_t *dirty;
+	const int *pending;
+	int *downcount;
+	const u64 *dirtyBits;
+	void (*flush)(GPUCommonHW *gpu);
+};
+static_assert(sizeof(GeLoopArgs) == 88, "GeLoopArgs: the asm reads it at fixed offsets");
+static_assert(sizeof(CommandInfo) == 24 && offsetof(CommandInfo, func) == 8, "CommandInfo: the asm reads its rows");
+static_assert(sizeof(GPUCommonHW::CmdFunc) == 16, "a member pointer: function, then adjustment");
+#if PPSSPP_ARCH(ARM64)
+extern "C" void GeFastRunLoop(const GeLoopArgs *args);
+extern "C" void GeFastRunLoop3(const GeLoopArgs *args);
+#endif
+void GPUCommonHW::FlushDrawEngineForAsm() {
+	drawEngineCommon_->Flush();
+}
+static void GeFlushThunk(GPUCommonHW *gpu) {
+	gpu->FlushDrawEngineForAsm();
+}
+
 const CommonCommandTableEntry commonCommandTable[] = {
 	// From Common. No flushing but definitely need execute.
 	{ GE_CMD_OFFSETADDR, FLAG_EXECUTE, 0, &GPUCommon::Execute_OffsetAddr },
@@ -491,6 +540,7 @@ void GPUCommonHW::UpdateCmdInfo() {
 	} else {
 		cmdInfo_[GE_CMD_TEXFUNC].RemoveDirty(DIRTY_TEX_ALPHA_MUL);
 	}
+	BuildGeFastTables();
 }
 
 void GPUCommonHW::BeginHostFrame() {
@@ -774,6 +824,26 @@ void GPUCommonHW::FastRunLoop(DisplayList &list) {
 		return;
 	}
 
+#if PPSSPP_ARCH(ARM64)
+	static const int useAsm = getenv("DEADSTATION_PORTABLE_ASMLOOP") != nullptr ? atoi(getenv("DEADSTATION_PORTABLE_ASMLOOP")) : 0;
+	if (useAsm == 1) {
+		FastRunLoopAsm(list);
+		return;
+	}
+	if (useAsm == 2) {
+		const GeLoopArgs args{ this, &list.pc, Memory::base, gstate.cmdmem, cmdInfo_, geFastFlags_, &gstate_c.dirty, drawEngineCommon_->NumDrawCallsPtr(),
+			&downcount, geFastDirty_, &GeFlushThunk };
+		GeFastRunLoop(&args);
+		return;
+	}
+	if (useAsm == 3) {
+		const GeLoopArgs args{ this, &list.pc, Memory::base, gstate.cmdmem, cmdInfo_, geFastFlags_, &gstate_c.dirty, drawEngineCommon_->NumDrawCallsPtr(),
+			&downcount, geFastDirty_, &GeFlushThunk };
+		GeFastRunLoop3(&args);
+		return;
+	}
+#endif
+
 	const CommandInfo *cmdInfo = cmdInfo_;
 	int dc = downcount;
 	for (; dc > 0; --dc) {
@@ -811,6 +881,50 @@ void GPUCommonHW::FastRunLoop(DisplayList &list) {
 		list.pc += 4;
 	}
 	downcount = 0;
+}
+
+// (experiment) The ARM64 scan runs every command that needs no call; this side runs the one it stops on, by the same rules as the
+// loop above, and hands back to it.
+void GPUCommonHW::FastRunLoopAsm(DisplayList &list) {
+#if PPSSPP_ARCH(ARM64)
+	const CommandInfo *cmdInfo = cmdInfo_;
+	const GeFastScanArgs args{ Memory::base, gstate.cmdmem, geFastFlags_, geFastDirty_, &gstate_c.dirty, drawEngineCommon_->NumDrawCallsPtr() };
+	int dc = downcount;
+	while (dc > 0) {
+		dc = GeFastScan(&args, &list.pc, dc);
+		if (dc <= 0)
+			break;
+		const u32 op = *(const u32_le *)(Memory::base + list.pc);
+		const u32 cmd = op >> 24;
+		const CommandInfo &info = cmdInfo[cmd];
+		const u32 diff = op ^ gstate.cmdmem[cmd];
+		if (diff == 0) {
+			if (info.flags & FLAG_EXECUTE) {
+				downcount = dc;
+				(this->*info.func)(op, diff);
+				dc = downcount;
+			}
+		} else {
+			uint64_t flags = info.flags;
+			if ((flags & FLAG_FLUSHBEFOREONCHANGE) && drawEngineCommon_->GetNumDrawCalls() != 0) {
+				drawEngineCommon_->Flush();
+			}
+			gstate.cmdmem[cmd] = op;
+			if (flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) {
+				downcount = dc;
+				(this->*info.func)(op, diff);
+				dc = downcount;
+			} else {
+				uint64_t dirty = flags >> 8;
+				if (dirty)
+					gstate_c.Dirty(dirty);
+			}
+		}
+		list.pc += 4;
+		--dc;
+	}
+	downcount = 0;
+#endif
 }
 
 void GPUCommonHW::Execute_VertexType(u32 op, u32 diff) {

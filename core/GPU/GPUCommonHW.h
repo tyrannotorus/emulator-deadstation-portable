@@ -66,6 +66,8 @@ public:
 	typedef void (GPUCommonHW::*CmdFunc)(u32 op, u32 diff);
 
 	void FastRunLoop(DisplayList &list) override;
+	void FastRunLoopAsm(DisplayList &list);  // (experiment) DEADSTATION_PORTABLE_ASMLOOP=1
+	void FlushDrawEngineForAsm();  // (experiment) the ARM64 loop's flush, ASMLOOP=2
 	void ExecuteOp(u32 op, u32 diff) override;
 
 	bool PresentedThisFrame() const override;
