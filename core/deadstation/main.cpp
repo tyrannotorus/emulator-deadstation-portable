@@ -54,6 +54,10 @@
 #include "Core/HLE/sceCtrl.h"
 #include "Core/HLE/sceDisplay.h"
 #include "Core/HW/Display.h"
+#include "Core/MemMap.h"
+#include "Core/MIPS/MIPS.h"
+#include "Core/MIPS/JitCommon/JitCommon.h"
+#include "Core/MIPS/JitCommon/JitBlockCache.h"
 #include "Core/Loaders.h"
 #include "Core/System.h"
 #include "GPU/GPU.h"
@@ -525,6 +529,39 @@ int main(int argc, char **argv)
 					row = end + 1;
 				}
 			}
+			// the registers (a JIT dispatch into a block: x16 where it went, x17 the guest word's top byte, x26 the JIT's base, x27 the
+			// MIPS state, x28 guest memory), and where the guest was: its pc and the word there (0x68...... a block's mark)
+			for (int i = 0; i < 31; i += 4) {
+				const auto &r = uc->uc_mcontext.regs;
+				const int m = i + 3 < 31 ?
+					snprintf(line, sizeof(line), "Deadstation Portable: CRASHED x%d-x%d %016llx %016llx %016llx %016llx\n", i, i + 3,
+						(unsigned long long)r[i], (unsigned long long)r[i + 1], (unsigned long long)r[i + 2], (unsigned long long)r[i + 3]) :
+					snprintf(line, sizeof(line), "Deadstation Portable: CRASHED x%d-x30 %016llx %016llx %016llx, sp %016llx\n", i,
+						(unsigned long long)r[i], (unsigned long long)r[i + 1], (unsigned long long)r[i + 2], (unsigned long long)uc->uc_mcontext.sp);
+				if (m > 0)
+					(void)!write(2, line, (size_t)m);
+			}
+			if (currentMIPS != nullptr && MIPSComp::jit != nullptr) {
+				const u32 gpc = currentMIPS->pc;
+				const u32 word = Memory::IsValid4AlignedAddress(gpc) ? Memory::ReadUnchecked_U32(gpc) : 0;
+				const int m = snprintf(line, sizeof(line), "Deadstation Portable: CRASHED guest pc %08x, word there %08x, JIT code base %p, its blocks %d\n",
+					gpc, word, (const void *)MIPSComp::jit->GetCodeBase(), MIPSComp::jit->GetBlockCache() ? MIPSComp::jit->GetBlockCache()->GetNumBlocks() : -1);
+				if (m > 0)
+					(void)!write(2, line, (size_t)m);
+				// the newest block (where compiled code ends) and the block the guest word names, if it's a block's mark
+				JitBlockCache *blocks = MIPSComp::jit->GetBlockCache();
+				if (blocks != nullptr && blocks->GetNumBlocks() > 0) {
+					const JitBlock *last = blocks->GetBlock(blocks->GetNumBlocks() - 1);
+					const int k = blocks->GetBlockNumberFromEmuHackOp(MIPSOpcode(word), true);
+					const JitBlock *named = k >= 0 && k < blocks->GetNumBlocks() ? blocks->GetBlock(k) : nullptr;
+					const int q = snprintf(line, sizeof(line), "Deadstation Portable: CRASHED newest block %08x at %p +%u; the word's block %d: %08x at %p +%u%s\n",
+						last->originalAddress, (const void *)last->normalEntry, (unsigned)last->codeSize, k,
+						named ? named->originalAddress : 0u, named ? (const void *)named->normalEntry : nullptr, named ? (unsigned)named->codeSize : 0u,
+						named && named->invalid ? " (invalid)" : "");
+					if (q > 0)
+						(void)!write(2, line, (size_t)q);
+				}
+			}
 		};
 		sigaction(SIGTRAP, &crash, nullptr);
 		sigaction(SIGILL, &crash, nullptr);
@@ -759,11 +796,29 @@ int main(int argc, char **argv)
 				std::rename("/tmp/dsp-shot.ppm.tmp", "/tmp/dsp-shot.ppm");
 			}
 		}
+		// (tests) DEADSTATION_PORTABLE_STATE_EVERY=seconds: the test state loaded again that often (all the crashes seen followed a load)
+		static const double stateEvery = getenv("DEADSTATION_PORTABLE_STATE_EVERY") ? atof(getenv("DEADSTATION_PORTABLE_STATE_EVERY")) : 0.0;
+		static std::string stateAgain;
+		static double stateAgainAt = 0.0;
+		static int stateLoads = 0;
 		if (testState != nullptr && *testState != '\0' && perfFrames > 0)
 		{
 			ge::pause();
 			DS_LOG("test: state %s %s", testState, states::load(testState) ? "loaded" : "NOT loaded");
+			if (stateEvery > 0.0) {
+				stateAgain = testState;
+				stateAgainAt = time_now_d() + stateEvery;
+			}
 			testState = nullptr;
+			audio::clear();
+			__DisplaySetWasPaused();
+		}
+		else if (!stateAgain.empty() && time_now_d() >= stateAgainAt)
+		{
+			ge::pause();
+			const bool loaded = states::load(stateAgain);
+			DS_LOG("test: state loaded again (%d): %s", ++stateLoads, loaded ? "yes" : "NO");
+			stateAgainAt = time_now_d() + stateEvery;
 			audio::clear();
 			__DisplaySetWasPaused();
 		}
@@ -882,6 +937,19 @@ int main(int argc, char **argv)
 						(flips - flipsFrom) / span, (vblanks - vblanksFrom) / span, (double)(shown - shownFrom) / span, perfFrames, runWorst * 1000.0,
 						audio::level(), audio::takeUnderruns(), audio::takeDropped(), (unsigned)(held - heldFrom), CoreTiming::GetClockFrequencyHz() / 1000000,
 						(gpuStats.numFlips - madeFrom) / span, brickKhz / 1000);
+				// what the frames drew, a frame on average (the counters only grow; unsigned differences survive their wrapping)
+				{
+					static GPUStatistics was = gpuStats;
+					const unsigned frames = (unsigned)(gpuStats.numFlips - was.numFlips);
+					if (frames > 0) {
+						const auto per = [&](int now, int then) { return (double)(unsigned)(now - then) / frames; };
+						DS_LOG("draws: a frame %.0f flushes, %.0f draws (%.0f vertex decodes), %.0f vertices decoded, %.0f drawn, %.1f textures hashed (%.0f KB)",
+							per(gpuStats.numFlushes, was.numFlushes), per(gpuStats.numDrawCalls, was.numDrawCalls), per(gpuStats.numVertexDecodes, was.numVertexDecodes),
+							per(gpuStats.numVertsDecoded, was.numVertsDecoded), per(gpuStats.numVertsSubmitted, was.numVertsSubmitted),
+							per(gpuStats.numTexturesHashed, was.numTexturesHashed), per(gpuStats.numTextureDataBytesHashed, was.numTextureDataBytesHashed) / 1024.0);
+					}
+					was = gpuStats;
+				}
 				madeFrom = gpuStats.numFlips;
 				heldFrom = held;
 				if (g_Config.bAutoFrameSkip) {

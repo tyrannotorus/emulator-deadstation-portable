@@ -1691,6 +1691,32 @@ void GPUCommonHW::Execute_TgenMtxData(u32 op, u32 diff) {
 	gstate.texmtxdata = GE_CMD_TGENMATRIXDATA << 24;
 }
 
+// Deadstation Portable: a run of BONEMATRIXDATA words copied into the bone matrices (each word << 8), up to limit of them, four at a
+// time while all four are the command, the rest one by one; returns how many. The dirty bits for the run's matrices, once.
+// (It was a word at a time with the dirty flag stored back each word: Tekken 6, 3.7% of its GE thread in the handler.)
+static int CopyBoneMatrixRun(const u32_le *src, u32 *dst, int limit) {
+	int i = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+	const uint32x4_t cmd = vdupq_n_u32(GE_CMD_BONEMATRIXDATA);
+	for (; i + 4 <= limit; i += 4) {
+		const uint32x4_t w = vld1q_u32((const uint32_t *)src + i);
+		if (vminvq_u32(vceqq_u32(vshrq_n_u32(w, 24), cmd)) == 0)
+			break;
+		vst1q_u32(dst + i, vshlq_n_u32(w, 8));
+	}
+#endif
+	for (; i < limit && (src[i] >> 24) == GE_CMD_BONEMATRIXDATA; i++)
+		dst[i] = src[i] << 8;
+	return i;
+}
+
+static u32 BoneMatricesDirty(int first, int count) {
+	if (count <= 0)
+		return 0;
+	const int lo = first / 12, hi = (first + count - 1) / 12;
+	return (u32)(DIRTY_BONEMATRIX0 << lo) * ((2u << (hi - lo)) - 1);
+}
+
 void GPUCommonHW::Execute_BoneMtxNum(u32 op, u32 diff) {
 	if (!currentList) {
 		gstate.boneMatrixNumber = (GE_CMD_BONEMATRIXNUMBER << 24) | (op & 0x7F);
@@ -1727,17 +1753,8 @@ void GPUCommonHW::Execute_BoneMtxNum(u32 op, u32 diff) {
 				gstate_c.Dirty(DIRTY_BONEMATRIX0 << (num / 12));
 			}
 		} else {
-			while ((src[i] >> 24) == GE_CMD_BONEMATRIXDATA) {
-				dst[i] = src[i] << 8;
-				if (++i >= end) {
-					break;
-				}
-			}
-
-			const unsigned int numPlusCount = (op & 0x7F) + i;
-			for (unsigned int num = op & 0x7F; num < numPlusCount; num += 12) {
-				gstate_c.deferredVertTypeDirty |= DIRTY_BONEMATRIX0 << (num / 12);
-			}
+			i = CopyBoneMatrixRun(src, dst, end);
+			gstate_c.deferredVertTypeDirty |= BoneMatricesDirty(op & 0x7F, i);
 		}
 	}
 
@@ -1768,12 +1785,9 @@ void GPUCommonHW::Execute_BoneMtxData(u32 op, u32 diff) {
 	// (God of War's skinned characters: 2.3% of this thread going through here word by word).
 	if (g_Config.bSoftwareSkinning && currentList && num < 96 && !(currentList->pc < currentList->stall && currentList->pc + (96 - num) * 4 >= currentList->stall)) {
 		const u32_le *src = (const u32_le *)Memory::GetPointerUnchecked(currentList->pc + 4);
-		u32 *dst = (u32 *)gstate.boneMatrix;
-		int count = 0;
-		while (num < 96 && (src[count] >> 24) == GE_CMD_BONEMATRIXDATA) {
-			gstate_c.deferredVertTypeDirty |= DIRTY_BONEMATRIX0 << (num / 12);
-			dst[num++] = src[count++] << 8;
-		}
+		const int count = CopyBoneMatrixRun(src, (u32 *)gstate.boneMatrix + num, 96 - num);
+		gstate_c.deferredVertTypeDirty |= BoneMatricesDirty(num, count);
+		num += count;
 		if (count != 0) {
 			UpdatePC(currentList->pc, currentList->pc + count * 4);
 			currentList->pc += count * 4;
