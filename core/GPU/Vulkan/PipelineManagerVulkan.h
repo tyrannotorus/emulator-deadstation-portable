@@ -106,8 +106,16 @@ public:
 	void SavePipelineCache(FILE *file, bool saveRawPipelineCache, ShaderManagerVulkan *shaderManager, Draw::DrawContext *drawContext);
 	bool LoadPipelineCache(FILE *file, bool loadRawPipelineCache, ShaderManagerVulkan *shaderManager, Draw::DrawContext *drawContext, VKRPipelineLayout *layout, int multiSampleLevel);
 
+	// Deadstation Portable: the driver's compiled pipelines kept per game (PipelineManagerVulkan.cpp)
+	void SetDriverCachePath(const Path &path);
+
 private:
+	VkPipelineCache CreateDriverCache();
+	void SaveDriverCache();
+
 	DenseHashMap<VulkanPipelineKey, VulkanPipeline *> pipelines_;
 	VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
+	Path driverCachePath_;
+	size_t driverCacheSize_ = 0;
 	VulkanContext *vulkan_;
 };

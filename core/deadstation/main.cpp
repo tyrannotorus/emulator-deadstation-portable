@@ -893,6 +893,15 @@ int main(int argc, char **argv)
 					__DisplayTakeSkipCounts(&skipCount, &waitCount, &waitMs, &lateMean, &lateWorst);
 					DS_LOG("skip: a second of the game's time took %.3f s drawn, %.3f s skipped; skipping %s; %d skipped (at %.1f ms late, worst %.1f), %d waited %.0f ms in all", drawnCost, skippedCost, skipOn ? "allowed" : "off", skipCount, lateMean, lateWorst, waitCount, waitMs);
 				}
+				if (g_dsPipe.n.load() || g_dsSpv.n.load() || g_dsWait.n.load()) {
+					const auto take = [](DsCompileStat &s, uint32_t *n, double *ms, double *maxMs) {
+						*n = s.n.exchange(0); *ms = s.us.exchange(0) / 1000.0; *maxMs = s.maxUs.exchange(0) / 1000.0;
+					};
+					uint32_t pn, sn, wn; double pms, pmax, sms, smax, wms, wmax;
+					take(g_dsPipe, &pn, &pms, &pmax); take(g_dsSpv, &sn, &sms, &smax); take(g_dsWait, &wn, &wms, &wmax);
+					DS_LOG("compile: %u pipelines %.0f ms CPU (longest %.1f), %u shaders to SPIR-V %.0f ms CPU (longest %.1f); the render thread waited for them %u times, %.0f ms (longest %.1f)",
+						pn, pms, pmax, sn, sms, smax, wn, wms, wmax);
+				}
 				flipsFrom = flips;
 				vblanksFrom = vblanks;
 				shownFrom = shown;

@@ -24,6 +24,7 @@
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "Common/Log.h"
 #include "Common/TimeUtil.h"
+#include "Common/GPU/Vulkan/VulkanRenderManager.h"
 #include "Common/GPU/Vulkan/VulkanMemory.h"
 
 #include "GPU/GPUState.h"
@@ -43,7 +44,9 @@ static Promise<VkShaderModule> *CompileShaderModuleAsync(VulkanContext *vulkan, 
 		std::string errorMessage;
 		std::vector<uint32_t> spirv;
 
+		const double spvStart = DsThreadCpuMs();
 		bool success = GLSLtoSPV(stage, code, GLSLVariant::VULKAN, spirv, &errorMessage);
+		DsCompileStatAdd(g_dsSpv, DsThreadCpuMs() - spvStart);
 
 		if (!errorMessage.empty()) {
 			if (success) {

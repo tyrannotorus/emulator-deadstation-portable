@@ -85,6 +85,7 @@ GPU_Vulkan::GPU_Vulkan(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 	if (discID.size()) {
 		File::CreateFullPath(GetSysDirectory(DIRECTORY_APP_CACHE));
 		shaderCachePath_ = GetSysDirectory(DIRECTORY_APP_CACHE) / (discID + ".vkshadercache");
+		pipelineManager_->SetDriverCachePath(GetSysDirectory(DIRECTORY_APP_CACHE) / (discID + ".vkdriver"));
 		LoadCache(shaderCachePath_);
 	}
 

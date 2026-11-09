@@ -4,7 +4,11 @@
 #include <sstream>
 
 
+#include <unistd.h>
+
+#include "ext/xxhash.h"
 #include "Common/Log.h"
+#include "Common/File/FileUtil.h"
 #include "Common/StringUtils.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
 #include "GPU/Vulkan/PipelineManagerVulkan.h"
@@ -349,11 +353,119 @@ static VulkanPipeline *CreateVulkanPipeline(VulkanRenderManager *renderManager, 
 	return vulkanPipeline;
 }
 
+// Deadstation Portable: the driver's own compiled pipelines, kept per game in their own file (discID.vkdriver, beside the
+// .vkshadercache, whose format stays PPSSPP's) and given back to the driver at the next start. Tekken 6, 279 pipelines: the
+// start's compile 22.7 s -> 0.3 s. Checked before the driver sees it: our header (this device, driver version and cache UUID,
+// the size, an XXH3 of the data), then the driver's own header; anything off and the driver starts empty. Written whole to a
+// .tmp, synced, then renamed over the old one, and only when the driver's data grew: it only adds what it compiles (its bytes come
+// back in another order each run, the same size: Tekken 6 gave its 6907764 back reordered).
+namespace {
+struct DriverCacheHeader {
+	char magic[8];
+	uint32_t version;
+	uint32_t vendorID, deviceID, driverVersion;
+	uint8_t uuid[VK_UUID_SIZE];
+	uint64_t size, hash;
+};
+const char kDriverCacheMagic[8] = { 'D', 'S', 'P', 'V', 'K', 'D', 'R', 'V' };
+}
+
+void PipelineManagerVulkan::SetDriverCachePath(const Path &path) {
+	driverCachePath_ = path;
+}
+
+VkPipelineCache PipelineManagerVulkan::CreateDriverCache() {
+	const VkPhysicalDeviceProperties &props = vulkan_->GetPhysicalDeviceProperties().properties;
+	std::vector<uint8_t> data;
+	const char *verdict = "none yet";
+	if (driverCachePath_.Valid()) {
+		if (FILE *f = File::OpenCFile(driverCachePath_, "rb")) {
+			DriverCacheHeader h{};
+			verdict = "not this device's or driver's: not used";
+			if (fread(&h, sizeof(h), 1, f) == 1 && !memcmp(h.magic, kDriverCacheMagic, sizeof(h.magic)) && h.version == 1 &&
+				h.vendorID == props.vendorID && h.deviceID == props.deviceID && h.driverVersion == props.driverVersion &&
+				!memcmp(h.uuid, props.pipelineCacheUUID, VK_UUID_SIZE) &&
+				h.size >= sizeof(VkPipelineCacheHeaderVersionOne) && h.size <= 256 * 1024 * 1024) {
+				data.resize(h.size);
+				if (fread(data.data(), 1, h.size, f) != h.size || XXH3_64bits(data.data(), h.size) != h.hash) {
+					data.clear();
+					verdict = "damaged: not used";
+				} else {
+					VkPipelineCacheHeaderVersionOne vh;
+					memcpy(&vh, data.data(), sizeof(vh));
+					if (vh.headerSize < sizeof(vh) || vh.headerSize > h.size || vh.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
+						vh.vendorID != props.vendorID || vh.deviceID != props.deviceID || memcmp(vh.pipelineCacheUUID, props.pipelineCacheUUID, VK_UUID_SIZE)) {
+						data.clear();
+					} else {
+						verdict = "given to the driver";
+					}
+				}
+			}
+			fclose(f);
+		}
+	}
+	VkPipelineCacheCreateInfo pc{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+	pc.pInitialData = data.empty() ? nullptr : data.data();
+	pc.initialDataSize = data.size();
+	VkPipelineCache cache = VK_NULL_HANDLE;
+	VkResult res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &cache);
+	if (res != VK_SUCCESS && !data.empty()) {
+		verdict = "refused by the driver: not used";
+		data.clear();
+		pc.pInitialData = nullptr;
+		pc.initialDataSize = 0;
+		res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &cache);
+	}
+	driverCacheSize_ = data.size();
+	if (driverCachePath_.Valid())
+		NOTICE_LOG(Log::G3D, "Driver pipeline cache: %s (%d bytes)", verdict, (int)data.size());
+	return res == VK_SUCCESS ? cache : VK_NULL_HANDLE;
+}
+
+void PipelineManagerVulkan::SaveDriverCache() {
+	if (!driverCachePath_.Valid() || pipelineCache_ == VK_NULL_HANDLE)
+		return;
+	size_t bytes = 0;
+	if (vkGetPipelineCacheData(vulkan_->GetDevice(), pipelineCache_, &bytes, nullptr) != VK_SUCCESS || bytes < sizeof(VkPipelineCacheHeaderVersionOne))
+		return;
+	std::vector<uint8_t> data(bytes);
+	if (vkGetPipelineCacheData(vulkan_->GetDevice(), pipelineCache_, &bytes, data.data()) != VK_SUCCESS)
+		return;
+	if (bytes == driverCacheSize_) {
+		NOTICE_LOG(Log::G3D, "Driver pipeline cache: nothing new (%d bytes)", (int)bytes);
+		return;
+	}
+	const uint64_t hash = XXH3_64bits(data.data(), bytes);
+	const VkPhysicalDeviceProperties &props = vulkan_->GetPhysicalDeviceProperties().properties;
+	DriverCacheHeader h{};
+	memcpy(h.magic, kDriverCacheMagic, sizeof(h.magic));
+	h.version = 1;
+	h.vendorID = props.vendorID;
+	h.deviceID = props.deviceID;
+	h.driverVersion = props.driverVersion;
+	memcpy(h.uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+	h.size = bytes;
+	h.hash = hash;
+	const Path tmp = driverCachePath_.WithExtraExtension(".tmp");
+	FILE *f = File::OpenCFile(tmp, "wb");
+	if (!f)
+		return;
+	bool ok = fwrite(&h, sizeof(h), 1, f) == 1 && fwrite(data.data(), 1, bytes, f) == bytes && fflush(f) == 0;
+	ok = ok && fsync(fileno(f)) == 0;
+	ok = fclose(f) == 0 && ok;
+	if (ok && File::Rename(tmp, driverCachePath_)) {
+		driverCacheSize_ = bytes;
+		NOTICE_LOG(Log::G3D, "Driver pipeline cache: saved (%d bytes)", (int)bytes);
+	} else {
+		File::Delete(tmp, true);
+		WARN_LOG(Log::G3D, "Driver pipeline cache: not saved");
+	}
+}
+
 VulkanPipeline *PipelineManagerVulkan::GetOrCreatePipeline(VulkanRenderManager *renderManager, VKRPipelineLayout *layout, const VulkanPipelineRasterStateKey &rasterKey, const DecVtxFormat *decFmt, VulkanVertexShader *vs, VulkanFragmentShader *fs, VulkanGeometryShader *gs, bool useHwTransform, u32 variantBitmask, int multiSampleLevel, bool cacheLoad) {
 	if (!pipelineCache_) {
-		VkPipelineCacheCreateInfo pc{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
-		VkResult res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &pipelineCache_);
-		_assert_(VK_SUCCESS == res);
+		pipelineCache_ = CreateDriverCache();
+		_assert_(pipelineCache_ != VK_NULL_HANDLE);
 	}
 
 	VulkanPipelineKey key{};
@@ -637,6 +749,8 @@ void PipelineManagerVulkan::SavePipelineCache(FILE *file, bool saveRawPipelineCa
 	size_t dataSize = 0;
 	uint32_t size;
 
+	SaveDriverCache();
+
 	if (saveRawPipelineCache) {
 		// WARNING: See comment in LoadCache before using this path.
 		VkResult result = vkGetPipelineCacheData(vulkan_->GetDevice(), pipelineCache_, &dataSize, nullptr);
@@ -766,10 +880,9 @@ bool PipelineManagerVulkan::LoadPipelineCache(FILE *file, bool loadRawPipelineCa
 		// Note that after loading the cache, it's still a good idea to pre-create the various pipelines.
 	} else {
 		if (!pipelineCache_) {
-			VkPipelineCacheCreateInfo pc{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
-			VkResult res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &pipelineCache_);
-			if (res != VK_SUCCESS) {
-				WARN_LOG(Log::G3D, "vkCreatePipelineCache failed (%08x), highly unexpected", (u32)res);
+			pipelineCache_ = CreateDriverCache();
+			if (pipelineCache_ == VK_NULL_HANDLE) {
+				WARN_LOG(Log::G3D, "vkCreatePipelineCache failed, highly unexpected");
 				return false;
 			}
 		}

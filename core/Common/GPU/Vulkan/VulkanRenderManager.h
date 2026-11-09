@@ -28,6 +28,12 @@
 #include "Common/GPU/Vulkan/VulkanDescSet.h"
 #include "Common/GPU/thin3d.h"
 
+// Deadstation Portable: compile counters (VulkanRenderManager.cpp), the log's "compile:" line
+struct DsCompileStat { std::atomic<uint32_t> n{0}, us{0}, maxUs{0}; };
+extern DsCompileStat g_dsPipe, g_dsSpv, g_dsWait;
+void DsCompileStatAdd(DsCompileStat &s, double ms);
+double DsThreadCpuMs();
+
 // Forward declaration
 VK_DEFINE_HANDLE(VmaAllocation);
 

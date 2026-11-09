@@ -1312,7 +1312,11 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 						graphicsPipeline->pipeline[(size_t)rpType] = Promise<VkPipeline>::CreateEmpty();
 						graphicsPipeline->Create(vulkan_, renderPass->Get(vulkan_, rpType, fbSampleCount), rpType, fbSampleCount, time_now_d(), -1);
 					}
+					const double waitStart = time_now_d();
 					pipeline = graphicsPipeline->pipeline[(size_t)rpType]->BlockUntilReady();
+					const double waited = (time_now_d() - waitStart) * 1000.0;
+					if (waited > 0.05)
+						DsCompileStatAdd(g_dsWait, waited);
 				}
 
 				if (pipeline != VK_NULL_HANDLE) {
