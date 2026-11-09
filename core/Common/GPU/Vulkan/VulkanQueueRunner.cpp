@@ -885,18 +885,60 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 		return r.colorLoad == VKRRenderPassLoadAction::CLEAR || r.depthLoad == VKRRenderPassLoadAction::CLEAR || r.stencilLoad == VKRRenderPassLoadAction::CLEAR;
 	};
 
+	// The other way round, when a later pass can't come forward because it reads what the passes in between drew: the earlier
+	// pass's draws go to the front of the later one (the same order on the framebuffer, one pass less to store and load). Only
+	// when nothing in between reads the framebuffer (the scan stops there) and nothing in between wrote what the earlier pass reads.
+	// (Experiment, DEADSTATION_PORTABLE_SINK=1.)
+	static const bool sinkOn = getenv("DEADSTATION_PORTABLE_SINK") != nullptr;
+	static int sinkFrames = 0, sinkCount = 0;
+	auto sinkRenderStep = [](VKRStep *dst, VKRStep *src) {
+		dst->commands.insert(dst->commands.begin(), src->commands.begin(), src->commands.end());
+		dst->preTransitions.append(src->preTransitions);
+		MergeRenderAreaRectInto(&dst->render.renderArea, src->render.renderArea);
+		dst->render.colorLoad = src->render.colorLoad;
+		dst->render.depthLoad = src->render.depthLoad;
+		dst->render.stencilLoad = src->render.stencilLoad;
+		dst->render.clearColor = src->render.clearColor;
+		dst->render.clearDepth = src->render.clearDepth;
+		dst->render.clearStencil = src->render.clearStencil;
+		dst->render.numDraws += src->render.numDraws;
+		dst->render.numDrawsKeepingDepthStencil += src->render.numDrawsKeepingDepthStencil;
+		dst->render.usesDepth = dst->render.usesDepth || src->render.usesDepth;
+		dst->render.numReads += src->render.numReads;
+		dst->render.pipelineFlags |= src->render.pipelineFlags;
+		dst->render.renderPassType = MergeRPTypes(dst->render.renderPassType, src->render.renderPassType);
+		for (size_t k = 0; k < src->dependencies.size(); k++)
+			if (src->dependencies[k] != src->render.framebuffer)
+				dst->dependencies.insert(src->dependencies[k]);
+		src->dependencies.clear();
+		src->stepType = VKRStepType::RENDER_SKIP;
+	};
+	if (sinkOn && ++sinkFrames == 300) {
+		printf("sink: %d passes moved later in 300 frames\n", sinkCount);
+		fflush(stdout);
+		sinkFrames = sinkCount = 0;
+	}
+
 	// Now, let's go through the steps. If we find one that is rendered to more than once,
 	// we'll scan forward and slurp up any rendering that can be merged across.
 	for (int i = 0; i < (int)steps.size(); i++) {
 		if (steps[i]->stepType == VKRStepType::RENDER && counts[steps[i]->render.framebuffer] > 1) {
 			auto fb = steps[i]->render.framebuffer;
 			TinySet<VKRFramebuffer *, 8> touchedFramebuffers;  // must be the same fast-size as the dependencies TinySet for annoying reasons.
+			bool hoisted = false;
+			// what the passes merged forward into i read: checked, as i's own reads are, against everything written up to the sink
+			TinySet<VKRFramebuffer *, 8> hoistedDeps;
 			for (int j = i + 1; j < (int)steps.size(); j++) {
 				// If any other passes are reading from this framebuffer as-is, we cancel the scan.
 				if (steps[j]->dependencies.contains(fb)) {
 					// Reading from itself means a KEEP, which is okay.
-					if (steps[j]->stepType != VKRStepType::RENDER || steps[j]->render.framebuffer != fb)
+					if (steps[j]->stepType != VKRStepType::RENDER || steps[j]->render.framebuffer != fb) {
+						if (sinkOn && sinkFrames == 1 && fb && fb->width >= 900)
+							printf("sink: %s's scan stopped at step %d (type %d%s%s): it reads it\n", fb->Tag(), j - i, (int)steps[j]->stepType,
+								steps[j]->stepType == VKRStepType::RENDER ? " into " : "",
+								steps[j]->stepType == VKRStepType::RENDER && steps[j]->render.framebuffer ? steps[j]->render.framebuffer->Tag() : "");
 						break;
+					}
 				}
 				switch (steps[j]->stepType) {
 				case VKRStepType::RENDER:
@@ -904,10 +946,24 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 						// Prevent Unknown's example case from https://github.com/hrydgard/ppsspp/pull/12242
 						// A pass that reads what the ones before it drew has to stay behind them.
 						if (renderHasClear(steps[j]) || steps[j]->render.selfRead || steps[j]->dependencies.contains(touchedFramebuffers)) {
+							if (sinkOn && sinkFrames == 1 && fb && fb->width >= 900)
+								printf("sink: %s at step %d: clear %d selfRead %d/%d hoisted %d (they read what's between %d) earlier reads what's between %d\n", fb->Tag(), j - i, renderHasClear(steps[j]) ? 1 : 0,
+									steps[j]->render.selfRead ? 1 : 0, steps[i]->render.selfRead ? 1 : 0, hoisted ? 1 : 0, hoistedDeps.contains(touchedFramebuffers) ? 1 : 0, steps[i]->dependencies.contains(touchedFramebuffers) ? 1 : 0);
+							if (sinkOn && fb && !hoistedDeps.contains(touchedFramebuffers) && !renderHasClear(steps[j]) && !steps[j]->render.selfRead && !steps[i]->render.selfRead &&
+								!steps[i]->dependencies.contains(touchedFramebuffers)) {
+								sinkRenderStep(steps[j], steps[i]);
+								for (size_t k = 0; k < hoistedDeps.size(); k++)
+									steps[j]->dependencies.insert(hoistedDeps[k]);
+								sinkCount++;
+							}
 							goto done_fb;
 						} else {
 							// Safe to merge, great.
+							for (size_t k = 0; k < steps[j]->dependencies.size(); k++)
+								if (steps[j]->dependencies[k] != fb)
+									hoistedDeps.insert(steps[j]->dependencies[k]);
 							mergeRenderSteps(steps[i], steps[j]);
+							hoisted = true;
 						}
 					} else {
 						// Remember the framebuffer this wrote to. We can't merge with later passes that depend on these.
