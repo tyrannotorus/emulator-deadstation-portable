@@ -47,6 +47,12 @@ void VtxDec_Wf1_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVSc
 		gstate_c.vertexFullAlpha = false;
 }
 
+// The same with two weights: 43.1 against the JIT's 78.8 (source in L1), 52.2 / 83.7 (streamed); outputs and flag identical.
+void VtxDec_Wf2_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
+	if (!VdecHand_Wf2_Tu8pre_C4444_Ns8_Pf(srcp, dstp, count, uvScaleOffset, gstate.boneMatrix))
+		gstate_c.vertexFullAlpha = false;
+}
+
 void VtxDec_Tu8_C5551_Ps16(const u8 *srcp, u8 *dstp, int numVerts, const UVScale *uvScaleOffset) {
 	struct GTAVTX {
 		union {

@@ -12,3 +12,5 @@ extern "C" void VdecHand_Tu16_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const 
 extern "C" int VdecHand_Tu16pre_N8_C8888_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
 extern "C" int VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
 void VtxDec_Wf1_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+extern "C" int VdecHand_Wf2_Tu8pre_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
+void VtxDec_Wf2_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);

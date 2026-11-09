@@ -1397,13 +1397,14 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		jitted_ = steps_[0] == &VertexDecoder::Step_TcU16Prescale ? &VdecHand_Tu16pre_Ns8_Pf : &VdecHand_Tu16_Ns8_Pf;
 		return;
 	}
-	// W: float, one, skinned  T: u8 prescaled  C: 4444  N: s8  P: float: God of War's most used skinned format.
-	if (skinInDecode && nweights == 1 && numSteps_ == 5 && steps_[0] == &VertexDecoder::Step_WeightsFloatSkin &&
+	// W: float, one or two, skinned  T: u8 prescaled  C: 4444  N: s8  P: float: God of War's two most used skinned formats.
+	if (skinInDecode && (nweights == 1 || nweights == 2) && numSteps_ == 5 && steps_[0] == &VertexDecoder::Step_WeightsFloatSkin &&
 		steps_[1] == &VertexDecoder::Step_TcU8Prescale && steps_[2] == &VertexDecoder::Step_Color4444 &&
 		steps_[3] == &VertexDecoder::Step_NormalS8Skin && steps_[4] == &VertexDecoder::Step_PosFloatSkin && morphcount == 1 &&
-		VertexSize() == 24 && weightoff == 0 && tcoff == 4 && coloff == 6 && nrmoff == 8 && posoff == 12 &&
+		VertexSize() == 20 + 4 * nweights && weightoff == 0 && tcoff == 4 * nweights && coloff == 4 * nweights + 2 &&
+		nrmoff == 4 * nweights + 4 && posoff == 4 * nweights + 8 &&
 		decFmt.stride == 36 && decFmt.uvoff == 0 && decFmt.c0off == 8 && decFmt.nrmoff == 12 && decFmt.posoff == 24) {
-		jitted_ = &VtxDec_Wf1_Tu8_C4444_Ns8_Pf;
+		jitted_ = nweights == 1 ? &VtxDec_Wf1_Tu8_C4444_Ns8_Pf : &VtxDec_Wf2_Tu8_C4444_Ns8_Pf;
 		return;
 	}
 
