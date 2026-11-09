@@ -248,6 +248,28 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 	}
 
 	const u8 *loopStart = NopAlignCode16();
+	// Deadstation Portable: a skinned vertex's normal and position loaded before anything else, into registers no step touches
+	// (Q12, Q13), so the loads complete while the weights blend the matrix; the position step then transforms both, interleaved
+	// (each was loaded and used at once before: the two stalls 21% of God of War's skinned decoder).
+	skinPreload_ = dec.skinInDecode;
+	skinNormalPending_ = false;
+	if (skinPreload_) {
+		for (int i = 0; i < dec.numSteps_; i++) {
+			const auto st = dec.steps_[i];
+			if (st == &VertexDecoder::Step_NormalS8Skin)
+				fp.LDUR(32, S12, srcReg, dec.nrmoff);
+			else if (st == &VertexDecoder::Step_NormalS16Skin)
+				fp.LDUR(64, D12, srcReg, dec.nrmoff);
+			else if (st == &VertexDecoder::Step_NormalFloatSkin)
+				fp.LDUR(128, Q12, srcReg, dec.nrmoff);
+			else if (st == &VertexDecoder::Step_PosS8Skin)
+				fp.LDUR(32, S13, srcReg, dec.posoff);
+			else if (st == &VertexDecoder::Step_PosS16Skin)
+				fp.LDUR(64, D13, srcReg, dec.posoff);
+			else if (st == &VertexDecoder::Step_PosFloatSkin)
+				fp.LDUR(128, Q13, srcReg, dec.posoff);
+		}
+	}
 	for (int i = 0; i < dec.numSteps_; i++) {
 		if (!CompileStep(dec, i)) {
 			EndWrite();
@@ -719,34 +741,69 @@ void VertexDecoderJitCache::Jit_NormalS8ToFloat() {
 	fp.STUR(128, srcQ, dstReg, dec_->decFmt.nrmoff);
 }
 
+// Skinned: the normal (preloaded in Q12) converted here, transformed with the position in Jit_SkinTransform.
 void VertexDecoderJitCache::Jit_NormalS8Skin() {
-	Jit_AnyS8ToFloat(dec_->nrmoff);
-	Jit_WriteMatrixMul(dec_->decFmt.nrmoff, false);
+	fp.SXTL(8, D14, S12);
+	fp.SXTL(16, Q14, D14);
+	fp.SCVTF(32, Q14, Q14, 7);
+	skinNormalReg_ = Q14;
+	skinNormalOff_ = dec_->decFmt.nrmoff;
+	skinNormalPending_ = true;
 }
 
 void VertexDecoderJitCache::Jit_NormalS16Skin() {
-	Jit_AnyS16ToFloat(dec_->nrmoff);
-	Jit_WriteMatrixMul(dec_->decFmt.nrmoff, false);
+	fp.SXTL(16, Q14, D12);
+	fp.SCVTF(32, Q14, Q14, 15);
+	skinNormalReg_ = Q14;
+	skinNormalOff_ = dec_->decFmt.nrmoff;
+	skinNormalPending_ = true;
 }
 
 void VertexDecoderJitCache::Jit_NormalFloatSkin() {
-	fp.LDUR(128, srcQ, srcReg, dec_->nrmoff);
-	Jit_WriteMatrixMul(dec_->decFmt.nrmoff, false);
+	skinNormalReg_ = Q12;
+	skinNormalOff_ = dec_->decFmt.nrmoff;
+	skinNormalPending_ = true;
 }
 
+// Skinned: the position (preloaded in Q13) converted, then the position and the normal transformed by the blended matrix (Q4-Q7)
+// with an accumulator each (Q15, Q9), their multiplies interleaved (each accumulator's operations in the same order as before:
+// the same bits), stored in address order.
 void VertexDecoderJitCache::Jit_PosS8Skin() {
-	Jit_AnyS8ToFloat(dec_->posoff);
-	Jit_WriteMatrixMul(dec_->decFmt.posoff, true);
+	fp.SXTL(8, D13, S13);
+	fp.SXTL(16, Q13, D13);
+	fp.SCVTF(32, Q13, Q13, 7);
+	Jit_SkinTransform();
 }
 
 void VertexDecoderJitCache::Jit_PosS16Skin() {
-	Jit_AnyS16ToFloat(dec_->posoff);
-	Jit_WriteMatrixMul(dec_->decFmt.posoff, true);
+	fp.SXTL(16, Q13, D13);
+	fp.SCVTF(32, Q13, Q13, 15);
+	Jit_SkinTransform();
 }
 
 void VertexDecoderJitCache::Jit_PosFloatSkin() {
-	fp.LDUR(128, srcQ, srcReg, dec_->posoff);
-	Jit_WriteMatrixMul(dec_->decFmt.posoff, true);
+	Jit_SkinTransform();
+}
+
+void VertexDecoderJitCache::Jit_SkinTransform() {
+	if (skinNormalPending_) {
+		fp.FMUL(32, Q9, Q4, skinNormalReg_, 0);
+		fp.FMUL(32, Q15, Q4, Q13, 0);
+		fp.FMLA(32, Q9, Q5, skinNormalReg_, 1);
+		fp.FMLA(32, Q15, Q5, Q13, 1);
+		fp.FMLA(32, Q9, Q6, skinNormalReg_, 2);
+		fp.FMLA(32, Q15, Q6, Q13, 2);
+		fp.FADD(32, Q15, Q15, Q7);
+		fp.STUR(128, Q9, dstReg, skinNormalOff_);
+		fp.STUR(128, Q15, dstReg, dec_->decFmt.posoff);
+		skinNormalPending_ = false;
+	} else {
+		fp.FMUL(32, Q15, Q4, Q13, 0);
+		fp.FMLA(32, Q15, Q5, Q13, 1);
+		fp.FMLA(32, Q15, Q6, Q13, 2);
+		fp.FADD(32, Q15, Q15, Q7);
+		fp.STUR(128, Q15, dstReg, dec_->decFmt.posoff);
+	}
 }
 
 void VertexDecoderJitCache::Jit_AnyS8ToFloat(int srcoff) {

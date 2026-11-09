@@ -1389,6 +1389,15 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 
 	_assert_msg_(decFmt.uvfmt == DEC_FLOAT_2 || decFmt.uvfmt == DEC_NONE, "Reader only supports float UV");
 
+	// Deadstation Portable: hand-written ARM64 decoders (VertexDecoderHandArm64.cpp), for a format whose steps, sizes and offsets
+	// are exactly theirs. T: u16 N: s8 P: float, prescaled or not: OutRun 2006's most used (13% of its GE thread as JIT code).
+	if (numSteps_ == 3 && (steps_[0] == &VertexDecoder::Step_TcU16Prescale || steps_[0] == &VertexDecoder::Step_TcU16ToFloat) &&
+		steps_[1] == &VertexDecoder::Step_NormalS8 && steps_[2] == &VertexDecoder::Step_PosFloat && morphcount == 1 && VertexSize() == 20 &&
+		tcoff == 0 && nrmoff == 4 && posoff == 8 && decFmt.stride == 24 && decFmt.uvoff == 0 && decFmt.nrmoff == 8 && decFmt.posoff == 12) {
+		jitted_ = steps_[0] == &VertexDecoder::Step_TcU16Prescale ? &VdecHand_Tu16pre_Ns8_Pf : &VdecHand_Tu16_Ns8_Pf;
+		return;
+	}
+
 	// Only use the handwritten decoders if we have SSE or NEON. Don't want to use these on RISC-V, probably?
 	// See GetVertTypeID
 	uint32_t fmtWithoutSkinFlag = (fmt_ & ~0x04000000);
@@ -1407,6 +1416,18 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		jitted_ = jitCache->Compile(*this, &jittedSize_);
 		if (!jitted_) {
 			WARN_LOG(Log::G3D, "Vertex decoder JIT failed! fmt = %08x (%s)", fmt_, GetString(SHADER_STRING_SHORT_DESC).c_str());
+		}
+		// (profiling) each decoder's code, so a profile's samples map onto it (local/brick/vdecprof.py)
+		static const bool prof = getenv("DEADSTATION_PORTABLE_PROF") != nullptr;
+		if (prof && jitted_) {
+			std::string hex;
+			static const char digits[] = "0123456789abcdef";
+			for (int i = 0; i < jittedSize_; i++) {
+				hex += digits[((const u8 *)jitted_)[i] >> 4];
+				hex += digits[((const u8 *)jitted_)[i] & 15];
+			}
+			printf("vdec %08x %p %d %s | %s\n", fmt_, (const void *)jitted_, jittedSize_, GetString(SHADER_STRING_SHORT_DESC).c_str(), hex.c_str());
+			fflush(stdout);
 		}
 	}
 }

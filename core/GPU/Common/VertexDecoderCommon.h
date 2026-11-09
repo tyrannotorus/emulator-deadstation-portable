@@ -612,6 +612,14 @@ private:
 	void Jit_AnyS16Morph(int srcoff, int dstoff);
 	void Jit_AnyFloatMorph(int srcoff, int dstoff);
 
+	// Deadstation Portable: a skinned vertex's normal and position loaded first (Q12, Q13); the normal step converts it (into
+	// skinNormalReg_) and the position step transforms both, interleaved (Jit_SkinTransform).
+	void Jit_SkinTransform();
+	bool skinPreload_ = false;
+	bool skinNormalPending_ = false;
+	int skinNormalOff_ = 0;
+	Arm64Gen::ARM64Reg skinNormalReg_ = Arm64Gen::INVALID_REG;
+
 	const VertexDecoder *dec_ = nullptr;
 	Arm64Gen::ARM64FloatEmitter fp;
 };
