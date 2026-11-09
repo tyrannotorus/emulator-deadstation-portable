@@ -470,12 +470,12 @@ int main(int argc, char **argv)
 
 	signal(SIGTERM, [](int) { quit = true; });
 	signal(SIGUSR1, [](int) { shotWanted = true; });
-	// A trap (an assert's Crash(), a BRK in code) or an illegal instruction: where, said out loud, then the default end. The address
+	// A trap (an assert's Crash(), a BRK in code), an illegal instruction or a memory fault: where, said out loud, then the default end. The address
 	// is the executable's own when it's in it (llvm-addr2line -e the unstripped build), else absolute (JIT code, a library).
 	{
 		struct sigaction crash {};
 		crash.sa_flags = SA_SIGINFO | SA_RESETHAND;
-		crash.sa_sigaction = [](int sig, siginfo_t *, void *context) {
+		crash.sa_sigaction = [](int sig, siginfo_t *info, void *context) {
 			const ucontext_t *uc = (const ucontext_t *)context;
 			const uintptr_t pc = (uintptr_t)uc->uc_mcontext.pc, lr = (uintptr_t)uc->uc_mcontext.regs[30];
 			char line[256];
@@ -489,7 +489,13 @@ int main(int argc, char **argv)
 			char at[96], from[96];
 			where(pc, at, sizeof(at));
 			where(lr, from, sizeof(from));
-			const int n = snprintf(line, sizeof(line), "Deadstation Portable: CRASHED, signal %d at %s, return address %s\n", sig, at, from);
+			// a fault PPSSPP's memory handler didn't take (it hands them here): the address, and the default end (its handler would call
+			// this one again at every retry)
+			if (sig == SIGSEGV || sig == SIGBUS)
+				signal(sig, SIG_DFL);
+			const int n = (sig == SIGSEGV || sig == SIGBUS) ?
+				snprintf(line, sizeof(line), "Deadstation Portable: CRASHED, signal %d at %s, return address %s, fault address %p\n", sig, at, from, info != nullptr ? info->si_addr : nullptr) :
+				snprintf(line, sizeof(line), "Deadstation Portable: CRASHED, signal %d at %s, return address %s\n", sig, at, from);
 			if (n > 0)
 				(void)!write(2, line, (size_t)n);
 			// the mappings the two are in (an anonymous rwx one is JIT code)
@@ -522,6 +528,9 @@ int main(int argc, char **argv)
 		};
 		sigaction(SIGTRAP, &crash, nullptr);
 		sigaction(SIGILL, &crash, nullptr);
+		// (installed before the core's own fault handler, which keeps these and hands on the faults it doesn't take)
+		sigaction(SIGSEGV, &crash, nullptr);
+		sigaction(SIGBUS, &crash, nullptr);
 	}
 	signal(SIGINT, [](int) { quit = true; });
 

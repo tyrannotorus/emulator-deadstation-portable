@@ -1397,6 +1397,15 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		jitted_ = steps_[0] == &VertexDecoder::Step_TcU16Prescale ? &VdecHand_Tu16pre_Ns8_Pf : &VdecHand_Tu16_Ns8_Pf;
 		return;
 	}
+	// W: float, one, skinned  T: u8 prescaled  C: 4444  N: s8  P: float: God of War's most used skinned format.
+	if (skinInDecode && nweights == 1 && numSteps_ == 5 && steps_[0] == &VertexDecoder::Step_WeightsFloatSkin &&
+		steps_[1] == &VertexDecoder::Step_TcU8Prescale && steps_[2] == &VertexDecoder::Step_Color4444 &&
+		steps_[3] == &VertexDecoder::Step_NormalS8Skin && steps_[4] == &VertexDecoder::Step_PosFloatSkin && morphcount == 1 &&
+		VertexSize() == 24 && weightoff == 0 && tcoff == 4 && coloff == 6 && nrmoff == 8 && posoff == 12 &&
+		decFmt.stride == 36 && decFmt.uvoff == 0 && decFmt.c0off == 8 && decFmt.nrmoff == 12 && decFmt.posoff == 24) {
+		jitted_ = &VtxDec_Wf1_Tu8_C4444_Ns8_Pf;
+		return;
+	}
 
 	// Only use the handwritten decoders if we have SSE or NEON. Don't want to use these on RISC-V, probably?
 	// See GetVertTypeID

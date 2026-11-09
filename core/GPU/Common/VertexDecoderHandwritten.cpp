@@ -2,6 +2,7 @@
 #include "Common/Data/Convert/ColorConv.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 #include "GPU/GPUState.h"
+#include "GPU/Common/VertexDecoderHandwritten.h"
 
 #include "Common/Math/SIMDHeaders.h"
 
@@ -30,60 +31,20 @@
 // [04000122] P: s16 N: s8 T: u16  (14b) (1710813)
 // [04000116] P: s16 C: 5551 T: u16  (12b) (7688298)
 
-// This is the first GoW one. TODO: Do two verts at a time.
-// God of War.
+// God of War's T u16 N s8 C 8888 P float: hand-written ARM64 (VertexDecoderHandArm64.cpp: the same operations, two vertices a loop,
+// stores in address order). Raw cycles a vertex on the A53 (local/brick/vdecbench/gowbench.cpp, outputs and flag identical),
+// destination in the Vulkan memory the emulator decodes into: 14.7 against the compiled C++'s 45.5 (source in L1), 35.9 / 46.1
+// (source streamed).
 void VtxDec_Tu16_C8888_Pfloat(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
-	// Input: 4 + 4 + 4 + 12 = 24 bytes
-	struct GOWVTX {
-		union {
-			struct {
-				u16 u;
-				u16 v;
-			};
-			u32 packed_uv;
-		};
-		u32 packed_normal;
-		u32 col;
-		float x;
-		float y;
-		float z;
-	};
-	// NOTE: This might be different for different vertex formats.
-	// Output: 8 + 4 + 4 + 12 = 28 bytes.
-	struct OutVTX {
-		float u;
-		float v;
-		u32 packed_normal;
-		uint32_t col;
-		float x;
-		float y;
-		float z;
-	};
-	const GOWVTX *src = (const GOWVTX *)srcp;
-	OutVTX *dst = (OutVTX *)dstp;
-	float uscale = uvScaleOffset->uScale * (1.0f / 32768.0f);
-	float vscale = uvScaleOffset->vScale * (1.0f / 32768);
-	float uoff = uvScaleOffset->uOff;
-	float voff = uvScaleOffset->vOff;
+	gstate_c.vertexFullAlpha = VdecHand_Tu16pre_N8_C8888_Pf(srcp, dstp, count, uvScaleOffset) != 0;
+}
 
-	u32 alpha = 0xFFFFFFFF;
-
-	float32x2_t uvScale = vmul_f32(vld1_f32(&uvScaleOffset->uScale), vdup_n_f32(1.0f / 32768.0f));
-	float32x2_t uvOff = vld1_f32(&uvScaleOffset->uOff);
-	uint32x4_t alphaMask = vdupq_n_u32(0xFFFFFFFF);
-	for (int i = 0; i < count; i++) {
-		uint16x4_t uv = vld1_u16(&src[i].u);  // TODO: We only need the first two lanes, maybe there's a better way?
-		uint32x2_t fuv = vget_low_u32(vmovl_u16(uv));  // Only using the first two lanes
-		float32x2_t finalUV = vadd_f32(vmul_f32(vcvt_f32_u32(fuv), uvScale), uvOff);
-		u32 normal = src[i].packed_normal;
-		uint32x4_t colpos = vld1q_u32((const u32 *)&src[i].col);
-		alphaMask = vandq_u32(alphaMask, colpos);
-		vst1_f32(&dst[i].u, finalUV);
-		dst[i].packed_normal = normal;
-		vst1q_u32(&dst[i].col, colpos);
-	}
-	alpha = vgetq_lane_u32(alphaMask, 0);
-	gstate_c.vertexFullAlpha = (alpha >> 24) == 0xFF;
+// God of War's skinned W float (1 weight) T u8 C 4444 N s8 P float: hand-written ARM64, two vertices a loop. Raw cycles a vertex
+// (local/brick/vdecbench/gowskin.c, against the JIT's own code for it: outputs and flag identical): 38.0 against 70.7 (source in
+// L1), 44.6 / 73.7 (streamed). Clears vertexFullAlpha as the JIT's decoders do.
+void VtxDec_Wf1_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
+	if (!VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf(srcp, dstp, count, uvScaleOffset, gstate.boneMatrix))
+		gstate_c.vertexFullAlpha = false;
 }
 
 void VtxDec_Tu8_C5551_Ps16(const u8 *srcp, u8 *dstp, int numVerts, const UVScale *uvScaleOffset) {

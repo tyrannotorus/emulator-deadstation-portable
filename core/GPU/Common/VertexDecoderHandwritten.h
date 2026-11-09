@@ -9,3 +9,6 @@ void VtxDec_Tu8_C5551_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *u
 // Deadstation Portable: hand-written ARM64 (VertexDecoderHandArm64.cpp)
 extern "C" void VdecHand_Tu16pre_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
 extern "C" void VdecHand_Tu16_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+extern "C" int VdecHand_Tu16pre_N8_C8888_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+extern "C" int VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
+void VtxDec_Wf1_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
