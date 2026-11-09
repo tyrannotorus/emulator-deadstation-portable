@@ -163,6 +163,7 @@ extern PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
 extern PFN_vkCmdClearAttachments vkCmdClearAttachments;
 extern PFN_vkCmdResolveImage vkCmdResolveImage;
 extern PFN_vkCmdSetEvent vkCmdSetEvent;
+extern PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
 extern PFN_vkCmdResetEvent vkCmdResetEvent;
 extern PFN_vkCmdWaitEvents vkCmdWaitEvents;
 extern PFN_vkCmdPipelineBarrier vkCmdPipelineBarrier;
@@ -218,6 +219,7 @@ struct VulkanExtensions {
 	bool EXT_fragment_shader_interlock;
 	bool EXT_provoking_vertex;
 	bool EXT_scalar_block_layout;
+	bool KHR_push_descriptor;  // Deadstation Portable: the draw engine's images pushed at each draw (VKRPipelineLayout::push)
 	// bool EXT_depth_range_unrestricted;  // Allows depth outside [0.0, 1.0] in 32-bit float depth buffers.
 };
 

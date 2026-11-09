@@ -36,48 +36,38 @@ struct CommandInfo {
 
 static CommandInfo cmdInfo_[256];
 
-// (experiment) the command table as the ARM64 scan reads it (GeFastScanArm64.cpp): a flags byte and the dirty bits a command
-static u8 geFastFlags_[256];
-static u64 geFastDirty_[256];
-static void BuildGeFastTables() {
+// The command loop is hand-written ARM64 (GeRunLoopArm64.cpp). Its tables: a flags byte a command, then its dirty bits; and each
+// command's handler as a plain function.
+static struct { u8 flags[256]; u64 dirty[256]; } geTable_ alignas(64);
+static void *geHandlers_[256];
+static void BuildGeTables() {
 	for (int i = 0; i < 256; i++) {
 		const u64 flags = cmdInfo_[i].flags;
-		geFastFlags_[i] = ((flags & FLAG_EXECUTE) ? 1 : 0) | ((flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) ? 2 : 0) | ((flags & FLAG_FLUSHBEFOREONCHANGE) ? 4 : 0);
-		geFastDirty_[i] = flags >> 8;
+		geTable_.flags[i] = ((flags & FLAG_EXECUTE) ? 1 : 0) | ((flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) ? 2 : 0) | ((flags & FLAG_FLUSHBEFOREONCHANGE) ? 4 : 0);
+		geTable_.dirty[i] = flags >> 8;
+		// A member pointer (Itanium ABI, AArch64): the function's address (or a vtable offset), then the this-adjustment << 1 |
+		// virtual. The handlers are non-virtual members of GPUCommonHW and its first base: the address is the function.
+		struct Raw { uintptr_t ptr; intptr_t adj; } raw;
+		static_assert(sizeof(Raw) == sizeof(GPUCommonHW::CmdFunc), "member pointer layout");
+		memcpy(&raw, &cmdInfo_[i].func, sizeof(raw));
+		_assert_msg_(raw.adj == 0, "GE command %02x: a virtual or this-adjusting handler, which the ARM64 loop can't call", i);
+		geHandlers_[i] = (void *)raw.ptr;
 	}
 }
-struct GeFastScanArgs {
-	const u8 *base;
-	u32 *cmdmem;
-	const u8 *flags;
-	const u64 *dirtyBits;
-	uint64_t *dirty;
-	const int *pending;
-};
-static_assert(sizeof(GeFastScanArgs) == 48, "GeFastScanArgs: the asm reads it at fixed offsets");
-#if PPSSPP_ARCH(ARM64)
-extern "C" int GeFastScan(const GeFastScanArgs *args, u32 *pc, int dc);
-#endif
 struct GeLoopArgs {
 	GPUCommonHW *gpu;
 	u32 *pc;
 	const u8 *base;
 	u32 *cmdmem;
-	const CommandInfo *cmdInfo;
-	const u8 *flags;
+	void *const *handlers;
+	const u8 *table;
 	uint64_t *dirty;
 	const int *pending;
 	int *downcount;
-	const u64 *dirtyBits;
 	void (*flush)(GPUCommonHW *gpu);
 };
-static_assert(sizeof(GeLoopArgs) == 88, "GeLoopArgs: the asm reads it at fixed offsets");
-static_assert(sizeof(CommandInfo) == 24 && offsetof(CommandInfo, func) == 8, "CommandInfo: the asm reads its rows");
-static_assert(sizeof(GPUCommonHW::CmdFunc) == 16, "a member pointer: function, then adjustment");
-#if PPSSPP_ARCH(ARM64)
-extern "C" void GeFastRunLoop(const GeLoopArgs *args);
-extern "C" void GeFastRunLoop3(const GeLoopArgs *args);
-#endif
+static_assert(sizeof(GeLoopArgs) == 80, "GeLoopArgs: the asm reads it at fixed offsets");
+extern "C" void GeRunLoop(const GeLoopArgs *args);
 void GPUCommonHW::FlushDrawEngineForAsm() {
 	drawEngineCommon_->Flush();
 }
@@ -540,7 +530,7 @@ void GPUCommonHW::UpdateCmdInfo() {
 	} else {
 		cmdInfo_[GE_CMD_TEXFUNC].RemoveDirty(DIRTY_TEX_ALPHA_MUL);
 	}
-	BuildGeFastTables();
+	BuildGeTables();
 }
 
 void GPUCommonHW::BeginHostFrame() {
@@ -824,107 +814,12 @@ void GPUCommonHW::FastRunLoop(DisplayList &list) {
 		return;
 	}
 
-#if PPSSPP_ARCH(ARM64)
-	static const int useAsm = getenv("DEADSTATION_PORTABLE_ASMLOOP") != nullptr ? atoi(getenv("DEADSTATION_PORTABLE_ASMLOOP")) : 0;
-	if (useAsm == 1) {
-		FastRunLoopAsm(list);
-		return;
-	}
-	if (useAsm == 2) {
-		const GeLoopArgs args{ this, &list.pc, Memory::base, gstate.cmdmem, cmdInfo_, geFastFlags_, &gstate_c.dirty, drawEngineCommon_->NumDrawCallsPtr(),
-			&downcount, geFastDirty_, &GeFlushThunk };
-		GeFastRunLoop(&args);
-		return;
-	}
-	if (useAsm == 3) {
-		const GeLoopArgs args{ this, &list.pc, Memory::base, gstate.cmdmem, cmdInfo_, geFastFlags_, &gstate_c.dirty, drawEngineCommon_->NumDrawCallsPtr(),
-			&downcount, geFastDirty_, &GeFlushThunk };
-		GeFastRunLoop3(&args);
-		return;
-	}
-#endif
-
-	const CommandInfo *cmdInfo = cmdInfo_;
-	int dc = downcount;
-	for (; dc > 0; --dc) {
-		// We know that display list PCs have the upper nibble == 0 - no need to mask the pointer
-		const u32 op = *(const u32_le *)(Memory::base + list.pc);
-		// Deadstation Portable: the list four lines ahead on its way while these run: the CPU's core has just written it, so
-		// each new line was a wait (the line above took 5-14% of the GE's thread)
-		__builtin_prefetch(Memory::base + list.pc + 256);
-		const u32 cmd = op >> 24;
-		const CommandInfo &info = cmdInfo[cmd];
-		const u32 diff = op ^ gstate.cmdmem[cmd];
-		if (diff == 0) {
-			if (info.flags & FLAG_EXECUTE) {
-				downcount = dc;
-				(this->*info.func)(op, diff);
-				dc = downcount;
-			}
-		} else {
-			uint64_t flags = info.flags;
-			// Deadstation Portable: nothing queued, nothing to flush (DrawEngineVulkan::Flush's own first test), without the call
-			if ((flags & FLAG_FLUSHBEFOREONCHANGE) && drawEngineCommon_->GetNumDrawCalls() != 0) {
-				drawEngineCommon_->Flush();
-			}
-			gstate.cmdmem[cmd] = op;
-			if (flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) {
-				downcount = dc;
-				(this->*info.func)(op, diff);
-				dc = downcount;
-			} else {
-				uint64_t dirty = flags >> 8;
-				if (dirty)
-					gstate_c.Dirty(dirty);
-			}
-		}
-		list.pc += 4;
-	}
-	downcount = 0;
-}
-
-// (experiment) The ARM64 scan runs every command that needs no call; this side runs the one it stops on, by the same rules as the
-// loop above, and hands back to it.
-void GPUCommonHW::FastRunLoopAsm(DisplayList &list) {
-#if PPSSPP_ARCH(ARM64)
-	const CommandInfo *cmdInfo = cmdInfo_;
-	const GeFastScanArgs args{ Memory::base, gstate.cmdmem, geFastFlags_, geFastDirty_, &gstate_c.dirty, drawEngineCommon_->NumDrawCallsPtr() };
-	int dc = downcount;
-	while (dc > 0) {
-		dc = GeFastScan(&args, &list.pc, dc);
-		if (dc <= 0)
-			break;
-		const u32 op = *(const u32_le *)(Memory::base + list.pc);
-		const u32 cmd = op >> 24;
-		const CommandInfo &info = cmdInfo[cmd];
-		const u32 diff = op ^ gstate.cmdmem[cmd];
-		if (diff == 0) {
-			if (info.flags & FLAG_EXECUTE) {
-				downcount = dc;
-				(this->*info.func)(op, diff);
-				dc = downcount;
-			}
-		} else {
-			uint64_t flags = info.flags;
-			if ((flags & FLAG_FLUSHBEFOREONCHANGE) && drawEngineCommon_->GetNumDrawCalls() != 0) {
-				drawEngineCommon_->Flush();
-			}
-			gstate.cmdmem[cmd] = op;
-			if (flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) {
-				downcount = dc;
-				(this->*info.func)(op, diff);
-				dc = downcount;
-			} else {
-				uint64_t dirty = flags >> 8;
-				if (dirty)
-					gstate_c.Dirty(dirty);
-			}
-		}
-		list.pc += 4;
-		--dc;
-	}
-	downcount = 0;
-#endif
+	// Deadstation Portable: the loop is hand-written ARM64 (GeRunLoopArm64.cpp), the rules as they were in C++ here. Raw cycles a
+	// command on the A53 (local/brick/loopbench): unchanged 12.0 against the compiler's 19.5, changed 17.0 / 26.5, a handler
+	// call 27.6 / 32.5; Tekken 6's loop 9.9-10.3% of its CPU thread -> 8.5-9.2%.
+	const GeLoopArgs args{ this, &list.pc, Memory::base, gstate.cmdmem, geHandlers_, (const u8 *)&geTable_, &gstate_c.dirty,
+		drawEngineCommon_->NumDrawCallsPtr(), &downcount, &GeFlushThunk };
+	GeRunLoop(&args);
 }
 
 void GPUCommonHW::Execute_VertexType(u32 op, u32 diff) {

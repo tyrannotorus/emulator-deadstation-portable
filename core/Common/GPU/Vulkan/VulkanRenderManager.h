@@ -207,6 +207,11 @@ struct VKRPipelineLayout {
 	uint32_t bindingTypesCount = 0;
 	VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 	VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;  // only support 1 for now.
+	// Deadstation Portable: push mode. Set 0 (descriptorSetLayout) has only the dynamic uniform blocks, a set allocated when their
+	// buffers change; set 1 (pushSetLayout) the images and storage buffers, pushed at each draw that changes them. The bindings
+	// keep their numbers; the shaders put images and storage buffers in set 1 (g_drawImageSet).
+	bool push = false;
+	VkDescriptorSetLayout pushSetLayout = VK_NULL_HANDLE;
 	int pushConstSize = 0;
 	const char *tag = nullptr;
 
@@ -286,7 +291,7 @@ public:
 	// WARNING: desc must stick around during the lifetime of the pipeline! It's not enough to build it on the stack and drop it.
 	VKRGraphicsPipeline *CreateGraphicsPipeline(VKRGraphicsPipelineDesc *desc, PipelineFlags pipelineFlags, uint32_t variantBitmask, VkSampleCountFlagBits sampleCount, bool cacheLoad, const char *tag);
 
-	VKRPipelineLayout *CreatePipelineLayout(BindingType *bindingTypes, size_t bindingCount, bool geoShadersEnabled, const char *tag);
+	VKRPipelineLayout *CreatePipelineLayout(BindingType *bindingTypes, size_t bindingCount, bool geoShadersEnabled, const char *tag, bool push = false);
 	void DestroyPipelineLayout(VKRPipelineLayout *pipelineLayout);
 
 	void ReportBadStateForDraw();

@@ -1636,8 +1636,9 @@ void VulkanRenderManager::ResetStats() {
 	renderCPUTimeMs_.Reset();
 }
 
-VKRPipelineLayout *VulkanRenderManager::CreatePipelineLayout(BindingType *bindingTypes, size_t bindingTypesCount, bool geoShadersEnabled, const char *tag) {
+VKRPipelineLayout *VulkanRenderManager::CreatePipelineLayout(BindingType *bindingTypes, size_t bindingTypesCount, bool geoShadersEnabled, const char *tag, bool push) {
 	VKRPipelineLayout *layout = new VKRPipelineLayout();
+	layout->push = push;
 	layout->SetTag(tag);
 	layout->bindingTypesCount = (uint32_t)bindingTypesCount;
 
@@ -1688,25 +1689,62 @@ VKRPipelineLayout *VulkanRenderManager::CreatePipelineLayout(BindingType *bindin
 		}
 	}
 
-	VkDescriptorSetLayoutCreateInfo dsl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-	dsl.bindingCount = (uint32_t)bindingTypesCount;
-	dsl.pBindings = bindings;
-	VkResult res = vkCreateDescriptorSetLayout(vulkan_->GetDevice(), &dsl, nullptr, &layout->descriptorSetLayout);
-	_assert_(VK_SUCCESS == res && layout->descriptorSetLayout);
+	VkResult res;
+	BindingType poolTypes[VKRPipelineLayout::MAX_DESC_SET_BINDINGS];
+	uint32_t poolTypesCount = (uint32_t)bindingTypesCount;
+	memcpy(poolTypes, bindingTypes, sizeof(BindingType) * bindingTypesCount);
+	if (!push) {
+		VkDescriptorSetLayoutCreateInfo dsl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+		dsl.bindingCount = (uint32_t)bindingTypesCount;
+		dsl.pBindings = bindings;
+		res = vkCreateDescriptorSetLayout(vulkan_->GetDevice(), &dsl, nullptr, &layout->descriptorSetLayout);
+		_assert_(VK_SUCCESS == res && layout->descriptorSetLayout);
 
-	VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-	VkDescriptorSetLayout setLayouts[1] = { layout->descriptorSetLayout };
-	pl.setLayoutCount = ARRAY_SIZE(setLayouts);
-	pl.pSetLayouts = setLayouts;
-	res = vkCreatePipelineLayout(vulkan_->GetDevice(), &pl, nullptr, &layout->pipelineLayout);
-	_assert_(VK_SUCCESS == res && layout->pipelineLayout);
+		VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+		VkDescriptorSetLayout setLayouts[1] = { layout->descriptorSetLayout };
+		pl.setLayoutCount = ARRAY_SIZE(setLayouts);
+		pl.pSetLayouts = setLayouts;
+		res = vkCreatePipelineLayout(vulkan_->GetDevice(), &pl, nullptr, &layout->pipelineLayout);
+		_assert_(VK_SUCCESS == res && layout->pipelineLayout);
+	} else {
+		// set 0: the dynamic uniform blocks; set 1, pushed: the rest (images, storage buffers). Same binding numbers.
+		VkDescriptorSetLayoutBinding set0[VKRPipelineLayout::MAX_DESC_SET_BINDINGS], set1[VKRPipelineLayout::MAX_DESC_SET_BINDINGS];
+		uint32_t n0 = 0, n1 = 0;
+		poolTypesCount = 0;
+		for (int i = 0; i < (int)bindingTypesCount; i++) {
+			if (bindings[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+				set0[n0++] = bindings[i];
+				poolTypes[poolTypesCount++] = bindingTypes[i];
+			} else {
+				set1[n1++] = bindings[i];
+			}
+		}
+		VkDescriptorSetLayoutCreateInfo dsl0 = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+		dsl0.bindingCount = n0;
+		dsl0.pBindings = set0;
+		res = vkCreateDescriptorSetLayout(vulkan_->GetDevice(), &dsl0, nullptr, &layout->descriptorSetLayout);
+		_assert_(VK_SUCCESS == res && layout->descriptorSetLayout);
+		VkDescriptorSetLayoutCreateInfo dsl1 = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+		dsl1.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+		dsl1.bindingCount = n1;
+		dsl1.pBindings = set1;
+		res = vkCreateDescriptorSetLayout(vulkan_->GetDevice(), &dsl1, nullptr, &layout->pushSetLayout);
+		_assert_(VK_SUCCESS == res && layout->pushSetLayout);
+
+		VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+		VkDescriptorSetLayout setLayouts[2] = { layout->descriptorSetLayout, layout->pushSetLayout };
+		pl.setLayoutCount = ARRAY_SIZE(setLayouts);
+		pl.pSetLayouts = setLayouts;
+		res = vkCreatePipelineLayout(vulkan_->GetDevice(), &pl, nullptr, &layout->pipelineLayout);
+		_assert_(VK_SUCCESS == res && layout->pipelineLayout);
+	}
 
 	vulkan_->SetDebugName(layout->descriptorSetLayout, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, tag);
 	vulkan_->SetDebugName(layout->pipelineLayout, VK_OBJECT_TYPE_PIPELINE_LAYOUT, tag);
 
 	for (int i = 0; i < VulkanContext::MAX_INFLIGHT_FRAMES; i++) {
 		// Some games go beyond 1024 and end up having to resize like GTA, but most stay below so we start there.
-		layout->frameData[i].pool.Create(vulkan_, bindingTypes, (uint32_t)bindingTypesCount, 1024);
+		layout->frameData[i].pool.Create(vulkan_, poolTypes, poolTypesCount, push ? 64 : 1024);
 	}
 
 	pipelineLayouts_.push_back(layout);
@@ -1727,6 +1765,8 @@ void VulkanRenderManager::DestroyPipelineLayout(VKRPipelineLayout *layout) {
 		}
 		vkDestroyPipelineLayout(vulkan->GetDevice(), layout->pipelineLayout, nullptr);
 		vkDestroyDescriptorSetLayout(vulkan->GetDevice(), layout->descriptorSetLayout, nullptr);
+		if (layout->pushSetLayout)
+			vkDestroyDescriptorSetLayout(vulkan->GetDevice(), layout->pushSetLayout, nullptr);
 
 		delete layout;
 	}, layout);
@@ -1762,6 +1802,52 @@ void VKRPipelineLayout::FlushDescSets(VulkanContext *vulkan, int frame, QueuePro
 	FastVec<PendingDescSet> &descSets = data.descSets_;
 
 	pool.Reset();
+
+	if (push) {
+		// Only set 0, the dynamic uniform blocks: a set when their buffers change from the last draw's (the offsets go with each
+		// draw). The images and storage buffers are pushed while recording (VulkanQueueRunner::PerformRenderPass).
+		VkDescriptorSet lastSet = VK_NULL_HANDLE;
+		const PackedDescriptor *last = nullptr;
+		int written = 0, reused = 0;
+		for (size_t index = data.flushedDescriptors_; index < descSets.size(); index++) {
+			PendingDescSet &d = descSets[index];
+			const PackedDescriptor *pd = descData.begin() + d.offset;
+			bool same = last != nullptr;
+			for (int i = 0; same && i < d.count; i++) {
+				if (bindingTypes[i] == BindingType::UNIFORM_BUFFER_DYNAMIC_ALL || bindingTypes[i] == BindingType::UNIFORM_BUFFER_DYNAMIC_VERTEX)
+					same = pd[i].buffer.buffer == last[i].buffer.buffer && pd[i].buffer.range == last[i].buffer.range;
+			}
+			if (same) {
+				d.set = lastSet;
+				reused++;
+				continue;
+			}
+			VkDescriptorSet set;
+			bool success = pool.Allocate(&set, 1, &descriptorSetLayout);
+			_dbg_assert_(success);
+			VkWriteDescriptorSet writes[MAX_DESC_SET_BINDINGS];
+			VkDescriptorBufferInfo bufferInfo[MAX_DESC_SET_BINDINGS];
+			int numWrites = 0;
+			for (int i = 0; i < d.count; i++) {
+				if (bindingTypes[i] != BindingType::UNIFORM_BUFFER_DYNAMIC_ALL && bindingTypes[i] != BindingType::UNIFORM_BUFFER_DYNAMIC_VERTEX)
+					continue;
+				if (!pd[i].buffer.buffer)
+					continue;
+				bufferInfo[numWrites] = { pd[i].buffer.buffer, 0, pd[i].buffer.range };
+				writes[numWrites] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, (uint32_t)i, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, nullptr, &bufferInfo[numWrites], nullptr };
+				numWrites++;
+			}
+			vkUpdateDescriptorSets(vulkan->GetDevice(), numWrites, writes, 0, nullptr);
+			d.set = set;
+			lastSet = set;
+			last = pd;
+			written++;
+		}
+		data.flushedDescriptors_ = (int)descSets.size();
+		profile->descriptorsWritten += written;
+		profile->descriptorsDeduped += reused;
+		return;
+	}
 
 	VkDescriptorSet setCache[8];
 	VkDescriptorSetLayout layoutsForAlloc[ARRAY_SIZE(setCache)];

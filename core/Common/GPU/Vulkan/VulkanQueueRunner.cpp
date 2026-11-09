@@ -885,12 +885,11 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 		return r.colorLoad == VKRRenderPassLoadAction::CLEAR || r.depthLoad == VKRRenderPassLoadAction::CLEAR || r.stencilLoad == VKRRenderPassLoadAction::CLEAR;
 	};
 
-	// The other way round, when a later pass can't come forward because it reads what the passes in between drew: the earlier
-	// pass's draws go to the front of the later one (the same order on the framebuffer, one pass less to store and load). Only
-	// when nothing in between reads the framebuffer (the scan stops there) and nothing in between wrote what the earlier pass reads.
-	// (Experiment, DEADSTATION_PORTABLE_SINK=1.)
-	static const bool sinkOn = getenv("DEADSTATION_PORTABLE_SINK") != nullptr;
-	static int sinkFrames = 0, sinkCount = 0;
+	// Deadstation Portable: the other way round, when a later pass can't come forward because it reads what the passes in between
+	// drew: the earlier pass's draws go to the front of the later one (the same order on the framebuffer, one pass less to store and
+	// load). Only when nothing in between reads the framebuffer (the scan stops there), nothing in between wrote what the earlier
+	// pass (or what came forward into it) reads, and the later pass neither clears nor reads its own framebuffer. OutRun 2006 at
+	// 960x544: its main pass, split around its reflection passes, one pass again (+3 vblanks/s); pictures identical in six games.
 	auto sinkRenderStep = [](VKRStep *dst, VKRStep *src) {
 		dst->commands.insert(dst->commands.begin(), src->commands.begin(), src->commands.end());
 		dst->preTransitions.append(src->preTransitions);
@@ -913,32 +912,20 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 		src->dependencies.clear();
 		src->stepType = VKRStepType::RENDER_SKIP;
 	};
-	if (sinkOn && ++sinkFrames == 300) {
-		printf("sink: %d passes moved later in 300 frames\n", sinkCount);
-		fflush(stdout);
-		sinkFrames = sinkCount = 0;
-	}
-
 	// Now, let's go through the steps. If we find one that is rendered to more than once,
 	// we'll scan forward and slurp up any rendering that can be merged across.
 	for (int i = 0; i < (int)steps.size(); i++) {
 		if (steps[i]->stepType == VKRStepType::RENDER && counts[steps[i]->render.framebuffer] > 1) {
 			auto fb = steps[i]->render.framebuffer;
 			TinySet<VKRFramebuffer *, 8> touchedFramebuffers;  // must be the same fast-size as the dependencies TinySet for annoying reasons.
-			bool hoisted = false;
 			// what the passes merged forward into i read: checked, as i's own reads are, against everything written up to the sink
 			TinySet<VKRFramebuffer *, 8> hoistedDeps;
 			for (int j = i + 1; j < (int)steps.size(); j++) {
 				// If any other passes are reading from this framebuffer as-is, we cancel the scan.
 				if (steps[j]->dependencies.contains(fb)) {
 					// Reading from itself means a KEEP, which is okay.
-					if (steps[j]->stepType != VKRStepType::RENDER || steps[j]->render.framebuffer != fb) {
-						if (sinkOn && sinkFrames == 1 && fb && fb->width >= 900)
-							printf("sink: %s's scan stopped at step %d (type %d%s%s): it reads it\n", fb->Tag(), j - i, (int)steps[j]->stepType,
-								steps[j]->stepType == VKRStepType::RENDER ? " into " : "",
-								steps[j]->stepType == VKRStepType::RENDER && steps[j]->render.framebuffer ? steps[j]->render.framebuffer->Tag() : "");
+					if (steps[j]->stepType != VKRStepType::RENDER || steps[j]->render.framebuffer != fb)
 						break;
-					}
 				}
 				switch (steps[j]->stepType) {
 				case VKRStepType::RENDER:
@@ -946,15 +933,11 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 						// Prevent Unknown's example case from https://github.com/hrydgard/ppsspp/pull/12242
 						// A pass that reads what the ones before it drew has to stay behind them.
 						if (renderHasClear(steps[j]) || steps[j]->render.selfRead || steps[j]->dependencies.contains(touchedFramebuffers)) {
-							if (sinkOn && sinkFrames == 1 && fb && fb->width >= 900)
-								printf("sink: %s at step %d: clear %d selfRead %d/%d hoisted %d (they read what's between %d) earlier reads what's between %d\n", fb->Tag(), j - i, renderHasClear(steps[j]) ? 1 : 0,
-									steps[j]->render.selfRead ? 1 : 0, steps[i]->render.selfRead ? 1 : 0, hoisted ? 1 : 0, hoistedDeps.contains(touchedFramebuffers) ? 1 : 0, steps[i]->dependencies.contains(touchedFramebuffers) ? 1 : 0);
-							if (sinkOn && fb && !hoistedDeps.contains(touchedFramebuffers) && !renderHasClear(steps[j]) && !steps[j]->render.selfRead && !steps[i]->render.selfRead &&
+							if (fb && !hoistedDeps.contains(touchedFramebuffers) && !renderHasClear(steps[j]) && !steps[j]->render.selfRead && !steps[i]->render.selfRead &&
 								!steps[i]->dependencies.contains(touchedFramebuffers)) {
 								sinkRenderStep(steps[j], steps[i]);
 								for (size_t k = 0; k < hoistedDeps.size(); k++)
 									steps[j]->dependencies.insert(hoistedDeps[k]);
-								sinkCount++;
 							}
 							goto done_fb;
 						} else {
@@ -963,7 +946,6 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 								if (steps[j]->dependencies[k] != fb)
 									hoistedDeps.insert(steps[j]->dependencies[k]);
 							mergeRenderSteps(steps[i], steps[j]);
-							hoisted = true;
 						}
 					} else {
 						// Remember the framebuffer this wrote to. We can't merge with later passes that depend on these.
@@ -1236,6 +1218,61 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 	FastVec<PendingDescSet> *descSets = nullptr;
 	VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 
+	// Deadstation Portable: a push-mode layout (VKRPipelineLayout::push): set 0 bound when it or its offsets change, set 1 pushed
+	// when a draw's images or storage buffers differ from the last push. Both stay bound across pipelines of the same layout.
+	const VKRPipelineLayout *layoutObj = nullptr;
+	const FastVec<PackedDescriptor> *descData = nullptr;
+	VkDescriptorSet boundSet = VK_NULL_HANDLE;
+	uint32_t boundOffsets[3]{};
+	int boundNumOffsets = -1;
+	const PackedDescriptor *pushed = nullptr;
+	int pushedCount = 0;
+	auto bindDraw = [&](int descSetIndex, int numUboOffsets, const uint32_t *uboOffsets) {
+		const PendingDescSet &ds = (*descSets)[descSetIndex];
+		if (!layoutObj->push) {
+			VkDescriptorSet set = ds.set;
+			_dbg_assert_(set != VK_NULL_HANDLE);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &set, numUboOffsets, uboOffsets);
+			return;
+		}
+		if (ds.set != boundSet || numUboOffsets != boundNumOffsets || memcmp(uboOffsets, boundOffsets, sizeof(uint32_t) * numUboOffsets) != 0) {
+			VkDescriptorSet set = ds.set;
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &set, numUboOffsets, uboOffsets);
+			boundSet = ds.set;
+			boundNumOffsets = numUboOffsets;
+			memcpy(boundOffsets, uboOffsets, sizeof(uint32_t) * numUboOffsets);
+		}
+		const PackedDescriptor *pd = descData->begin() + ds.offset;
+		if (pushed != nullptr && pushedCount == ds.count && memcmp(pd, pushed, sizeof(PackedDescriptor) * ds.count) == 0)
+			return;
+		VkWriteDescriptorSet writes[VKRPipelineLayout::MAX_DESC_SET_BINDINGS];
+		VkDescriptorImageInfo imageInfo[VKRPipelineLayout::MAX_DESC_SET_BINDINGS];
+		VkDescriptorBufferInfo bufferInfo[VKRPipelineLayout::MAX_DESC_SET_BINDINGS];
+		uint32_t n = 0;
+		for (int i = 0; i < ds.count; i++) {
+			if (!pd[i].image.view)  // (also a null buffer, by the union) unused by the shader, as with sets
+				continue;
+			switch (layoutObj->bindingTypes[i]) {
+			case BindingType::COMBINED_IMAGE_SAMPLER:
+				imageInfo[n] = { pd[i].image.sampler, pd[i].image.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+				writes[n] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, (uint32_t)i, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfo[n], nullptr, nullptr };
+				n++;
+				break;
+			case BindingType::STORAGE_BUFFER_VERTEX:
+				bufferInfo[n] = { pd[i].buffer.buffer, pd[i].buffer.offset, pd[i].buffer.range };
+				writes[n] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, VK_NULL_HANDLE, (uint32_t)i, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bufferInfo[n], nullptr };
+				n++;
+				break;
+			default:  // the dynamic uniform blocks: set 0
+				break;
+			}
+		}
+		if (n != 0)
+			vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, n, writes);
+		pushed = pd;
+		pushedCount = ds.count;
+	};
+
 	bool pipelineOK = false;
 
 	int lastStencilWriteMask = -1;
@@ -1282,6 +1319,14 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 					descSets = &c.graphics_pipeline.pipelineLayout->frameData[curFrame].descSets_;
 					pipelineLayout = c.graphics_pipeline.pipelineLayout->pipelineLayout;
+					if (layoutObj != c.graphics_pipeline.pipelineLayout) {
+						// another layout: what was bound and pushed for the last one no longer is
+						layoutObj = c.graphics_pipeline.pipelineLayout;
+						descData = &layoutObj->frameData[curFrame].descData_;
+						boundSet = VK_NULL_HANDLE;
+						boundNumOffsets = -1;
+						pushed = nullptr;
+					}
 					_dbg_assert_(pipelineLayout != VK_NULL_HANDLE);
 					lastGraphicsPipeline = graphicsPipeline;
 					pipelineOK = true;
@@ -1363,9 +1408,7 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 
 		case VKRRenderCommand::DRAW_INDEXED:
 			if (pipelineOK) {
-				VkDescriptorSet set = (*descSets)[c.drawIndexed.descSetIndex].set;
-				_dbg_assert_(set != VK_NULL_HANDLE);
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &set, c.drawIndexed.numUboOffsets, c.drawIndexed.uboOffsets);
+				bindDraw(c.drawIndexed.descSetIndex, c.drawIndexed.numUboOffsets, c.drawIndexed.uboOffsets);
 				vkCmdBindIndexBuffer(cmd, c.drawIndexed.ibuffer, c.drawIndexed.ioffset, VK_INDEX_TYPE_UINT16);
 				VkDeviceSize voffset = c.drawIndexed.voffset;
 				vkCmdBindVertexBuffers(cmd, 0, 1, &c.drawIndexed.vbuffer, &voffset);
@@ -1375,9 +1418,7 @@ void VulkanQueueRunner::PerformRenderPass(const VKRStep &step, VkCommandBuffer c
 
 		case VKRRenderCommand::DRAW:
 			if (pipelineOK) {
-				VkDescriptorSet set = (*descSets)[c.drawIndexed.descSetIndex].set;
-				_dbg_assert_(set != VK_NULL_HANDLE);
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &set, c.draw.numUboOffsets, c.draw.uboOffsets);
+				bindDraw(c.drawIndexed.descSetIndex, c.draw.numUboOffsets, c.draw.uboOffsets);
 				if (c.draw.vbuffer) {
 					vkCmdBindVertexBuffers(cmd, 0, 1, &c.draw.vbuffer, &c.draw.voffset);
 				}

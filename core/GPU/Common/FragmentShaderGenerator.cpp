@@ -47,6 +47,8 @@ static const SamplerDef samplersStereo[3] = {
 	{ 2, "pal" },
 };
 
+int g_drawImageSet = 0;
+
 bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLanguageDesc &compat, Draw::Bugs bugs, uint64_t *uniformMask, FragmentShaderFlags *fragmentShaderFlags, std::string *errorString) {
 	*uniformMask = 0;
 	*fragmentShaderFlags = (FragmentShaderFlags)0;
@@ -203,16 +205,16 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 
 		WRITE(p, "layout (std140, set = 0, binding = %d) uniform baseUBO {\n%s};\n", DRAW_BINDING_DYNUBO_BASE, ub_baseStr);
 		if (doTexture) {
-			WRITE(p, "layout (set = 0, binding = %d) uniform %s%s tex;\n", DRAW_BINDING_TEXTURE, texture3D ? "sampler3D" : "sampler2D", arrayTexture ? "Array" : "");
+			WRITE(p, "layout (set = %d, binding = %d) uniform %s%s tex;\n", g_drawImageSet, DRAW_BINDING_TEXTURE, texture3D ? "sampler3D" : "sampler2D", arrayTexture ? "Array" : "");
 		}
 
 		if (readFramebufferTex) {
 			// The framebuffer texture is always bound as an array.
-			p.F("layout (set = 0, binding = %d) uniform sampler2DArray fbotex;\n", DRAW_BINDING_2ND_TEXTURE);
+			p.F("layout (set = %d, binding = %d) uniform sampler2DArray fbotex;\n", g_drawImageSet, DRAW_BINDING_2ND_TEXTURE);
 		}
 
 		if (shaderDepalMode != ShaderDepalMode::OFF) {
-			WRITE(p, "layout (set = 0, binding = %d) uniform sampler2D pal;\n", DRAW_BINDING_DEPAL_TEXTURE);
+			WRITE(p, "layout (set = %d, binding = %d) uniform sampler2D pal;\n", g_drawImageSet, DRAW_BINDING_DEPAL_TEXTURE);
 		}
 
 		// Note: the precision qualifiers must match the vertex shader!

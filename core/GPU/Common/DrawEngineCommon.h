@@ -160,7 +160,7 @@ public:
 	int GetNumDrawCalls() const {
 		return numDrawVerts_;
 	}
-	// (experiment) for the GE loop's ARM64 scan, which reads it without a call
+	// for the ARM64 command loop, which reads it without a call
 	const int *NumDrawCallsPtr() const {
 		return &numDrawVerts_;
 	}

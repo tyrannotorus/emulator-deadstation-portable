@@ -547,7 +547,7 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  vec4 tex;\n");
 			WRITE(p, "  vec4 col;\n");
 			WRITE(p, "};\n");
-			WRITE(p, "layout (std430, set = 0, binding = %d) readonly buffer s_tess_data {\n", DRAW_BINDING_TESS_STORAGE_BUF);
+			WRITE(p, "layout (std430, set = %d, binding = %d) readonly buffer s_tess_data {\n", g_drawImageSet, DRAW_BINDING_TESS_STORAGE_BUF);
 			WRITE(p, "  TessData tess_data[];\n");
 			WRITE(p, "};\n");
 
@@ -555,10 +555,10 @@ bool GenerateVertexShader(const VShaderID &id, char *buffer, const ShaderLanguag
 			WRITE(p, "  vec4 basis;\n");
 			WRITE(p, "  vec4 deriv;\n");
 			WRITE(p, "};\n");
-			WRITE(p, "layout (std430, set = 0, binding = %d) readonly buffer s_tess_weights_u {\n", DRAW_BINDING_TESS_STORAGE_BUF_WU);
+			WRITE(p, "layout (std430, set = %d, binding = %d) readonly buffer s_tess_weights_u {\n", g_drawImageSet, DRAW_BINDING_TESS_STORAGE_BUF_WU);
 			WRITE(p, "  TessWeight tess_weights_u[];\n");
 			WRITE(p, "};\n");
-			WRITE(p, "layout (std430, set = 0, binding = %d) readonly buffer s_tess_weights_v {\n", DRAW_BINDING_TESS_STORAGE_BUF_WV);
+			WRITE(p, "layout (std430, set = %d, binding = %d) readonly buffer s_tess_weights_v {\n", g_drawImageSet, DRAW_BINDING_TESS_STORAGE_BUF_WV);
 			WRITE(p, "  TessWeight tess_weights_v[];\n");
 			WRITE(p, "};\n");
 		} else if (ShaderLanguageIsOpenGL(compat.shaderLanguage)) {

@@ -92,7 +92,10 @@ void DrawEngineVulkan::InitDeviceObjects() {
 	VkDevice device = vulkan->GetDevice();
 
 	VulkanRenderManager *renderManager = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
-	pipelineLayout_ = renderManager->CreatePipelineLayout(bindingTypes, ARRAY_SIZE(bindingTypes), draw_->GetDeviceCaps().geometryShaderSupported, "drawengine_layout");
+	// Deadstation Portable: images and storage buffers pushed at each draw when the device has push descriptors (set 1 in the shaders)
+	const bool push = vulkan->Extensions().KHR_push_descriptor;
+	g_drawImageSet = push ? 1 : 0;
+	pipelineLayout_ = renderManager->CreatePipelineLayout(bindingTypes, ARRAY_SIZE(bindingTypes), draw_->GetDeviceCaps().geometryShaderSupported, "drawengine_layout", push);
 
 	pushUBO_ = (VulkanPushPool *)draw_->GetNativeObject(Draw::NativeObject::PUSH_POOL);
 	pushVertex_ = new VulkanPushPool(vulkan, "pushVertex", 4 * 1024 * 1024, 256, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);

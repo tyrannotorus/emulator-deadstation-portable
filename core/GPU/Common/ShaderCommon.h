@@ -19,6 +19,10 @@
 
 #include <cstdint>
 #include <vector>
+
+// Deadstation Portable: the descriptor set the draw engine's images and storage buffers are in: 1 when its Vulkan layout pushes
+// them (VKRPipelineLayout::push), else 0 (set by DrawEngineVulkan before any shader is generated).
+extern int g_drawImageSet;
 #include <string>
 
 namespace Draw {

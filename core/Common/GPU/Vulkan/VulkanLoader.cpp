@@ -149,6 +149,7 @@ PFN_vkEndCommandBuffer vkEndCommandBuffer;
 PFN_vkResetCommandBuffer vkResetCommandBuffer;
 PFN_vkCmdClearAttachments vkCmdClearAttachments;
 PFN_vkCmdSetEvent vkCmdSetEvent;
+PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
 PFN_vkCmdResetEvent vkCmdResetEvent;
 PFN_vkCmdWaitEvents vkCmdWaitEvents;
 PFN_vkCmdBeginRenderPass vkCmdBeginRenderPass;
@@ -473,6 +474,9 @@ void VulkanLoadDeviceFunctions(VkDevice device, const VulkanExtensions &enabledE
 	}
 	if (enabledExtensions.KHR_create_renderpass2) {
 		LOAD_DEVICE_FUNC_CORE(device, vkCreateRenderPass2, vkCreateRenderPass2KHR, VK_API_VERSION_1_2);
+	}
+	if (enabledExtensions.KHR_push_descriptor) {
+		LOAD_DEVICE_FUNC(device, vkCmdPushDescriptorSetKHR);
 	}
 	if (enabledExtensions.KHR_maintenance4) {
 		LOAD_DEVICE_FUNC_CORE(device, vkGetDeviceBufferMemoryRequirements, vkGetDeviceBufferMemoryRequirementsKHR, VK_API_VERSION_1_3);
