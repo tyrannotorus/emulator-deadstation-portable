@@ -25,6 +25,9 @@
 #include "GPU/GPUState.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 
+#include <functional>
+#include <vector>
+
 alignas(16) static float bones[16 * 8];  // First four are kept in registers
 
 using namespace Arm64Gen;
@@ -247,6 +250,28 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		LDRH(INDEX_UNSIGNED, boundsMaxVReg, scratchReg64, offsetof(KnownVertexBounds, maxV));
 	}
 
+	// Deadstation Portable: two vertices a loop first (Jit_Pair), this one-vertex loop after it for an odd last one.
+	const bool pair = PairSupported(dec);
+	FixupBranch pairsDone;
+	if (pair) {
+		if (prescaleStep) {
+			// v's scale and offset as scalars of their own (u's are S0 and S1, the low lanes of D0 and D1)
+			fp.INS(32, Q16, 0, Q0, 1);
+			fp.INS(32, Q17, 0, Q1, 1);
+		}
+		SUBS(counterReg, counterReg, 2);
+		FixupBranch noPairs = B(CC_LT);
+		const u8 *pairStart = NopAlignCode16();
+		Jit_Pair(dec);
+		ADDI2R(srcReg, srcReg, dec.VertexSize() * 2, scratchReg);
+		ADDI2R(dstReg, dstReg, dec.decFmt.stride * 2, scratchReg);
+		SUBS(counterReg, counterReg, 2);
+		B(CC_GE, pairStart);
+		SetJumpTarget(noPairs);
+		ADDI2R(counterReg, counterReg, 2, scratchReg);
+		pairsDone = CBZ(counterReg);
+	}
+
 	const u8 *loopStart = NopAlignCode16();
 	// Deadstation Portable: a skinned vertex's normal and position loaded before anything else, into registers no step touches
 	// (Q12, Q13), so the loads complete while the weights blend the matrix; the position step then transforms both, interleaved
@@ -286,6 +311,8 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 	ADDI2R(dstReg, dstReg, dec.decFmt.stride, scratchReg);
 	SUBS(counterReg, counterReg, 1);
 	B(CC_NEQ, loopStart);
+	if (pair)
+		SetJumpTarget(pairsDone);
 
 	if (updateFullAlpha) {
 		FixupBranch skip = CBZ(alphaNonFullReg);
@@ -830,3 +857,204 @@ void VertexDecoderJitCache::Jit_WriteMatrixMul(int outOff, bool pos) {
 	fp.STUR(128, accNEON, dstReg, outOff);
 }
 
+// ---- Deadstation Portable: two vertices a loop ----
+//
+// The one-vertex loop above runs each step's instructions as a chain: on the in-order A53 every load, conversion and multiply
+// waits for the one before it. Here each component's instructions for vertex A and for vertex B go into lists of their own, with
+// registers of their own, and the lists are emitted one instruction from each in turn: two independent chains (and integer
+// work beside vector work) for the core to dual-issue. The loads, conversions and stores are the old steps' (the same widths at
+// the same offsets, in the same order: A's stores, then B's), so the bytes written are the same, those past a vertex too; the
+// texture coordinates are converted from general registers (one cycle a value instead of two 128-bit widenings), with the same
+// fused multiply-add per lane. Measured against the old loop's code on the Brick (local/brick/vdecbench/skinbench.c).
+
+namespace {
+
+typedef std::function<void()> PairOp;
+
+struct PairLane {
+	int s, d;              // this vertex's offsets from srcReg and dstReg
+	ARM64Reg uvU, uvV;     // W: raw texture coordinates, or float ones copied
+	ARM64Reg c1, c2, c3;   // W: color
+	ARM64Reg n1, n2;       // W: an s8 or s16 normal
+	ARM64Reg fU, fV;       // S: texture coordinates converted (D views: the float prescale path)
+	ARM64Reg pos, pos2;    // V: the position (S/D/Q views), and a 12-byte float copy's last word
+	ARM64Reg nrm, nrm2;    // V: a float normal, and its 12-byte copy's last word
+};
+
+// Lane A in W3-W9 and V18/V19/V22/V24/V26/V27, lane B in W10, W11, W13-W17 and V20/V21/V23/V25/V28/V29: none of them saved
+// registers; W12 (the alpha flag), W2, X0, X1, V0, V1 and V16/V17 (v's scale and offset) are shared.
+const PairLane kPairLanes[2] = {
+	{ 0, 0, W6, W7, W3, W4, W5, W8, W9, S18, S19, S22, S24, S26, S27 },
+	{ 0, 0, W14, W15, W10, W11, W13, W16, W17, S20, S21, S23, S25, S28, S29 },
+};
+
+bool IsStep(const VertexDecoder &dec, int i, StepFunction f) {
+	return dec.steps_[i] == f;
+}
+
+}  // namespace
+
+bool VertexDecoderJitCache::PairSupported(const VertexDecoder &dec) const {
+	if (dec.skinInDecode || dec.morphcount != 1)
+		return false;
+	typedef VertexDecoder V;
+	static const StepFunction ok[] = {
+		&V::Step_TcU8Prescale, &V::Step_TcU16Prescale, &V::Step_TcFloatPrescale, &V::Step_TcU8ToFloat, &V::Step_TcU16ToFloat,
+		&V::Step_TcFloat,
+		&V::Step_Color8888, &V::Step_Color4444, &V::Step_Color565, &V::Step_Color5551,
+		&V::Step_NormalS8, &V::Step_NormalS16, &V::Step_NormalFloat,
+		&V::Step_PosS8, &V::Step_PosS16, &V::Step_PosFloat,
+	};
+	for (int i = 0; i < dec.numSteps_; i++) {
+		bool found = false;
+		for (StepFunction f : ok)
+			found = found || dec.steps_[i] == f;
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
+void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
+	typedef VertexDecoder V;
+	PairLane lanes[2] = { kPairLanes[0], kPairLanes[1] };
+	lanes[1].s = dec.VertexSize();
+	lanes[1].d = dec.decFmt.stride;
+	std::vector<PairOp> lists[8];  // per lane: texture coordinates, color, normal, position
+	std::vector<PairOp> stores[2];
+
+	for (int k = 0; k < 2; k++) {
+		const PairLane R = lanes[k];
+		std::vector<PairOp> &tc = lists[k], &col = lists[2 + k], &nrm = lists[4 + k], &pos = lists[6 + k];
+		std::vector<PairOp> &st = stores[k];
+		for (int i = 0; i < dec.numSteps_; i++) {
+			const bool tcU8Pre = IsStep(dec, i, &V::Step_TcU8Prescale), tcU16Pre = IsStep(dec, i, &V::Step_TcU16Prescale);
+			const bool tcU8 = IsStep(dec, i, &V::Step_TcU8ToFloat), tcU16 = IsStep(dec, i, &V::Step_TcU16ToFloat);
+			if (tcU8Pre || tcU16Pre || tcU8 || tcU16) {
+				const bool wide = tcU16Pre || tcU16, pre = tcU8Pre || tcU16Pre;
+				const int off = R.s + dec.tcoff, fbits = wide ? 15 : 7;
+				tc.push_back([=] { if (wide) LDURH(R.uvU, srcReg, off); else LDURB(R.uvU, srcReg, off); });
+				tc.push_back([=] { if (wide) LDURH(R.uvV, srcReg, off + 2); else LDURB(R.uvV, srcReg, off + 1); });
+				tc.push_back([=] { fp.UCVTF(R.fU, R.uvU, fbits); });
+				tc.push_back([=] { fp.UCVTF(R.fV, R.uvV, fbits); });
+				if (pre) {
+					tc.push_back([=] { fp.FMADD(R.fU, R.fU, S0, S1); });     // offset u + u * scale u
+					tc.push_back([=] { fp.FMADD(R.fV, R.fV, S16, S17); });   // offset v + v * scale v
+				}
+				st.push_back([=] { fp.STP(32, INDEX_SIGNED, R.fU, R.fV, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_TcFloatPrescale)) {
+				const ARM64Reg raw = EncodeRegToDouble(R.fU), out = EncodeRegToDouble(R.fV);
+				tc.push_back([=] { fp.LDUR(64, raw, srcReg, R.s + dec.tcoff); });
+				tc.push_back([=] { fp.MOV(out, neonUVOffsetReg); });
+				tc.push_back([=] { fp.FMLA(32, out, raw, neonUVScaleReg); });
+				st.push_back([=] { fp.STUR(64, out, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_TcFloat)) {
+				tc.push_back([=] { LDP(INDEX_SIGNED, R.uvU, R.uvV, srcReg, R.s + dec.tcoff); });
+				st.push_back([=] { STP(INDEX_SIGNED, R.uvU, R.uvV, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_Color8888)) {
+				col.push_back([=] { LDUR(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
+				st.push_back([=] { STUR(R.c1, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_Color4444)) {
+				col.push_back([=] { LDURH(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ANDI2R(R.c2, R.c1, 0x000F); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x00F0); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 4)); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x0F00); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 8)); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0xF000); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 12)); });
+				col.push_back([=] { ORR(R.c1, R.c2, R.c2, ArithOption(R.c2, ST_LSL, 4)); });
+				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
+				st.push_back([=] { STUR(R.c1, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_Color565)) {
+				col.push_back([=] { LDURH(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ANDI2R(R.c2, R.c1, 0x001F); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0xF800); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 5)); });
+				col.push_back([=] { LSL(R.c3, R.c2, 3); });
+				col.push_back([=] { ORR(R.c2, R.c3, R.c2, ArithOption(R.c2, ST_LSR, 2)); });
+				col.push_back([=] { ANDI2R(R.c2, R.c2, 0xFFFF00FF); });
+				col.push_back([=] { LSR(R.c1, R.c1, 5); });
+				col.push_back([=] { ANDI2R(R.c1, R.c1, 0x003F); });
+				col.push_back([=] { LSL(R.c3, R.c1, 2); });
+				col.push_back([=] { ORR(R.c3, R.c3, R.c1, ArithOption(R.c1, ST_LSR, 4)); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 8)); });
+				col.push_back([=] { ORRI2R(R.c1, R.c2, 0xFF000000); });
+				st.push_back([=] { STUR(R.c1, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_Color5551)) {
+				col.push_back([=] { LDURSH(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ANDI2R(R.c2, R.c1, 0x001F); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x03E0); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 3)); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x7C00); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 6)); });
+				col.push_back([=] { LSR(R.c3, R.c2, 2); });
+				col.push_back([=] { ANDI2R(R.c3, R.c3, ~0x000000F8); });
+				col.push_back([=] { ANDI2R(R.c3, R.c3, ~0x0000F800); });
+				col.push_back([=] { ORR(R.c2, R.c3, R.c2, ArithOption(R.c2, ST_LSL, 3)); });
+				col.push_back([=] { ANDI2R(R.c1, R.c1, 0xFF000000); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c1); });
+				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
+				st.push_back([=] { STUR(R.c2, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_NormalS8)) {
+				nrm.push_back([=] { LDURH(R.n1, srcReg, R.s + dec.nrmoff); });
+				nrm.push_back([=] { LDURB(R.n2, srcReg, R.s + dec.nrmoff + 2); });
+				nrm.push_back([=] { ORR(R.n1, R.n1, R.n2, ArithOption(R.n2, ST_LSL, 16)); });
+				st.push_back([=] { STUR(R.n1, dstReg, R.d + dec.decFmt.nrmoff); });
+			} else if (IsStep(dec, i, &V::Step_NormalS16)) {
+				nrm.push_back([=] { LDUR(R.n1, srcReg, R.s + dec.nrmoff); });
+				nrm.push_back([=] { LDURH(R.n2, srcReg, R.s + dec.nrmoff + 4); });
+				st.push_back([=] { STP(INDEX_SIGNED, R.n1, R.n2, dstReg, R.d + dec.decFmt.nrmoff); });
+			} else if (IsStep(dec, i, &V::Step_NormalFloat)) {
+				// as the old step: 16 bytes when both offsets are 8-aligned, else 12
+				if ((dec.nrmoff & 7) == 0 && (dec.decFmt.nrmoff & 7) == 0) {
+					nrm.push_back([=] { fp.LDUR(128, EncodeRegToQuad(R.nrm), srcReg, R.s + dec.nrmoff); });
+					st.push_back([=] { fp.STUR(128, EncodeRegToQuad(R.nrm), dstReg, R.d + dec.decFmt.nrmoff); });
+				} else {
+					nrm.push_back([=] { fp.LDUR(64, EncodeRegToDouble(R.nrm), srcReg, R.s + dec.nrmoff); });
+					nrm.push_back([=] { fp.LDUR(32, R.nrm2, srcReg, R.s + dec.nrmoff + 8); });
+					st.push_back([=] { fp.STUR(64, EncodeRegToDouble(R.nrm), dstReg, R.d + dec.decFmt.nrmoff); });
+					st.push_back([=] { fp.STUR(32, R.nrm2, dstReg, R.d + dec.decFmt.nrmoff + 8); });
+				}
+			} else if (IsStep(dec, i, &V::Step_PosS8)) {
+				pos.push_back([=] { fp.LDUR(32, R.pos, srcReg, R.s + dec.posoff); });
+				pos.push_back([=] { fp.SXTL(8, EncodeRegToDouble(R.pos), R.pos); });
+				pos.push_back([=] { fp.SXTL(16, EncodeRegToQuad(R.pos), EncodeRegToDouble(R.pos)); });
+				pos.push_back([=] { fp.SCVTF(32, EncodeRegToQuad(R.pos), EncodeRegToQuad(R.pos), 7); });
+				st.push_back([=] { fp.STUR(128, EncodeRegToQuad(R.pos), dstReg, R.d + dec.decFmt.posoff); });
+			} else if (IsStep(dec, i, &V::Step_PosS16)) {
+				pos.push_back([=] { fp.LDUR(64, EncodeRegToDouble(R.pos), srcReg, R.s + dec.posoff); });
+				pos.push_back([=] { fp.SXTL(16, EncodeRegToQuad(R.pos), EncodeRegToDouble(R.pos)); });
+				pos.push_back([=] { fp.SCVTF(32, EncodeRegToQuad(R.pos), EncodeRegToQuad(R.pos), 15); });
+				st.push_back([=] { fp.STUR(128, EncodeRegToQuad(R.pos), dstReg, R.d + dec.decFmt.posoff); });
+			} else if (IsStep(dec, i, &V::Step_PosFloat)) {
+				if ((dec.posoff & 7) == 0 && (dec.decFmt.posoff & 7) == 0) {
+					pos.push_back([=] { fp.LDUR(128, EncodeRegToQuad(R.pos), srcReg, R.s + dec.posoff); });
+					st.push_back([=] { fp.STUR(128, EncodeRegToQuad(R.pos), dstReg, R.d + dec.decFmt.posoff); });
+				} else {
+					pos.push_back([=] { fp.LDUR(64, EncodeRegToDouble(R.pos), srcReg, R.s + dec.posoff); });
+					pos.push_back([=] { fp.LDUR(32, R.pos2, srcReg, R.s + dec.posoff + 8); });
+					st.push_back([=] { fp.STUR(64, EncodeRegToDouble(R.pos), dstReg, R.d + dec.decFmt.posoff); });
+					st.push_back([=] { fp.STUR(32, R.pos2, dstReg, R.d + dec.decFmt.posoff + 8); });
+				}
+			}
+		}
+	}
+
+	// one instruction from each list in turn
+	size_t at[8]{};
+	for (bool any = true; any;) {
+		any = false;
+		for (int l = 0; l < 8; l++) {
+			if (at[l] < lists[l].size()) {
+				lists[l][at[l]++]();
+				any = true;
+			}
+		}
+	}
+	for (const PairOp &op : stores[0])
+		op();
+	for (const PairOp &op : stores[1])
+		op();
+}

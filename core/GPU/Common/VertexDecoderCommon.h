@@ -615,6 +615,9 @@ private:
 	// Deadstation Portable: a skinned vertex's normal and position loaded first (Q12, Q13); the normal step converts it (into
 	// skinNormalReg_) and the position step transforms both, interleaved (Jit_SkinTransform).
 	void Jit_SkinTransform();
+	// Deadstation Portable: two vertices a loop (VertexDecoderArm64.cpp)
+	bool PairSupported(const VertexDecoder &dec) const;
+	void Jit_Pair(const VertexDecoder &dec);
 	bool skinPreload_ = false;
 	bool skinNormalPending_ = false;
 	int skinNormalOff_ = 0;
