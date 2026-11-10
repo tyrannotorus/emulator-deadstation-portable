@@ -51,5 +51,9 @@ void toggleDpad();
 
 // the PSP's buttons now, to the game
 void update();
+// The menu (or a notice) has the pad: none of its buttons reach the game. When the game has it again, a button still held
+// stays away from the game until it's released.
+void toMenu();
+void toGame();
 
 }

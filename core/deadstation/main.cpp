@@ -650,6 +650,7 @@ int main(int argc, char **argv)
 		if (!id.empty() && getenv("DEADSTATION_PORTABLE_STATE") == nullptr && !File::Exists(played))
 		{
 			menu::firstRunNotice(padEvents, [] { return quit.load(); });
+			controls::toGame();
 			File::CreateFullPath(dir);
 			File::CreateEmptyFile(played);
 		}
@@ -710,6 +711,7 @@ int main(int argc, char **argv)
 		const auto events = padThreaded ? takePadEvents() : padEvents();
 		if (menu::isOpen())
 		{
+			controls::toMenu();
 			cpufreq::release();
 			for (const auto& [code, pressed] : events)
 				menu::input(code, pressed);
@@ -734,6 +736,7 @@ int main(int argc, char **argv)
 				break;
 			if (coreState == CORE_RUNTIME_ERROR)
 				break;
+			controls::toGame();
 			audio::clear();
 			audio::pause(false);
 			__DisplaySetWasPaused();

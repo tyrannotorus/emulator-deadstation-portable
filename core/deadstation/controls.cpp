@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sys/stat.h>
 
 namespace deadstation::controls
@@ -40,6 +41,22 @@ int bindings[Count];
 SDL_Joystick *pad = nullptr;
 std::string swapFile;
 bool swapped = false;
+// update() runs on the pad's thread, toMenu() and toGame() on the main one
+std::mutex gameMutex;
+bool menuHas = false;
+// the functions (a bit each) held as the menu let go, kept from the game until released
+uint32_t heldBack = 0;
+
+// a function down for the game: held, and not since the menu
+bool forGame(Function f)
+{
+	if (!held(f))
+	{
+		heldBack &= ~(1u << f);
+		return false;
+	}
+	return (heldBack & (1u << f)) == 0;
+}
 
 // the defaults
 std::string path()
@@ -205,11 +222,14 @@ void update()
 		{ Cross, CTRL_CROSS }, { Circle, CTRL_CIRCLE }, { Square, CTRL_SQUARE }, { Triangle, CTRL_TRIANGLE },
 		{ L, CTRL_LTRIGGER }, { R, CTRL_RTRIGGER }, { Select, CTRL_SELECT }, { Start, CTRL_START },
 	};
+	std::lock_guard<std::mutex> lock(gameMutex);
+	if (menuHas)
+		return;
 	u32 bits = 0;
 	for (const auto& b : Buttons)
-		if (held(b.function))
+		if (forGame(b.function))
 			bits |= b.bit;
-	const bool up = held(Up), down = held(Down), left = held(Left), right = held(Right);
+	const bool up = forGame(Up), down = forGame(Down), left = forGame(Left), right = forGame(Right);
 	float x = 0.f, y = 0.f;
 	if (swapped)
 	{
@@ -235,6 +255,25 @@ void update()
 	}
 	__CtrlUpdateButtons(bits, all & ~bits);
 	__CtrlSetAnalogXY(CTRL_STICK_LEFT, x, y);
+}
+
+void toMenu()
+{
+	std::lock_guard<std::mutex> lock(gameMutex);
+	menuHas = true;
+}
+
+void toGame()
+{
+	{
+		std::lock_guard<std::mutex> lock(gameMutex);
+		menuHas = false;
+		heldBack = 0;
+		for (int f = Up; f <= Start; f++)
+			if (held((Function)f))
+				heldBack |= 1u << f;
+	}
+	update();
 }
 
 }
