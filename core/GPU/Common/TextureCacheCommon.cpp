@@ -2391,6 +2391,9 @@ bool TextureCacheCommon::CheckFullHash(TexCacheEntry *entry, bool &doDelete) {
 	{
 		fullhash = QuickTexHash(entry->addr, entry->bufw, w, h, swizzled, GETextureFormat(entry->format), entry);
 	}
+	gpuStats.numTexturesHashed++;
+	if (fullhash != entry->fullhash)
+		gpuStats.numRehashesChanged++;
 
 	if (fullhash == entry->fullhash) {
 		entry->hashEpoch = hashEpoch_;

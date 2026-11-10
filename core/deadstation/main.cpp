@@ -943,10 +943,11 @@ int main(int argc, char **argv)
 					const unsigned frames = (unsigned)(gpuStats.numFlips - was.numFlips);
 					if (frames > 0) {
 						const auto per = [&](int now, int then) { return (double)(unsigned)(now - then) / frames; };
-						DS_LOG("draws: a frame %.0f flushes, %.0f draws (%.0f vertex decodes), %.0f vertices decoded, %.0f drawn, %.1f textures hashed (%.0f KB)",
+						DS_LOG("draws: a frame %.0f flushes, %.0f draws (%.0f vertex decodes), %.0f vertices decoded, %.0f drawn, %.1f textures rehashed (%.0f KB, %.2f changed)",
 							per(gpuStats.numFlushes, was.numFlushes), per(gpuStats.numDrawCalls, was.numDrawCalls), per(gpuStats.numVertexDecodes, was.numVertexDecodes),
 							per(gpuStats.numVertsDecoded, was.numVertsDecoded), per(gpuStats.numVertsSubmitted, was.numVertsSubmitted),
-							per(gpuStats.numTexturesHashed, was.numTexturesHashed), per(gpuStats.numTextureDataBytesHashed, was.numTextureDataBytesHashed) / 1024.0);
+							per(gpuStats.numTexturesHashed, was.numTexturesHashed), per(gpuStats.numTextureDataBytesHashed, was.numTextureDataBytesHashed) / 1024.0,
+							per(gpuStats.numRehashesChanged, was.numRehashesChanged));
 					}
 					was = gpuStats;
 				}
