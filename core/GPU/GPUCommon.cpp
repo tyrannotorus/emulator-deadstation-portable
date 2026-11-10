@@ -882,8 +882,7 @@ void GPUCommon::DoExecuteCall(u32 target) {
 	DisplayList *currentList = this->currentList;
 
 	// Bone matrix optimization - many games will CALL a bone matrix (!).
-	// We don't optimize during recording or debugging - so the matrix data gets recorded.
-	if (useFastRunLoop_ && Memory::IsValidRange(target, 13 * 4) && (Memory::ReadUnchecked_U32(target) >> 24) == GE_CMD_BONEMATRIXDATA) {
+	if (Memory::IsValidRange(target, 13 * 4) && (Memory::ReadUnchecked_U32(target) >> 24) == GE_CMD_BONEMATRIXDATA) {
 		// Check for the end
 		if ((Memory::ReadUnchecked_U32(target + 11 * 4) >> 24) == GE_CMD_BONEMATRIXDATA &&
 			(Memory::ReadUnchecked_U32(target + 12 * 4) >> 24) == GE_CMD_RET &&
@@ -1330,10 +1329,11 @@ void GPUCommon::FastLoadBoneMatrix(u32 target) {
 	}
 	gstate.FastLoadBoneMatrix(target);
 
-	cyclesExecuted += 2 * 14;  // one to reset the counter, 12 to load the matrix, and a return.
+	// the 12 words and the return, as if run (the CALL takes its own time where it is)
+	cyclesExecuted += 2 * 13;
 
 	if (coreCollectDebugStats) {
-		gpuStats.otherGPUCycles += 2 * 14;
+		gpuStats.otherGPUCycles += 2 * 13;
 	}
 }
 

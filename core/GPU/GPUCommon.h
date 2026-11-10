@@ -273,7 +273,6 @@ protected:
 	bool resumingFromDebugBreak_ = false;
 	bool dumpNextFrame_ = false;
 	bool dumpThisFrame_ = false;
-	bool useFastRunLoop_ = false;
 	bool interruptsEnabled_ = false;
 	bool displayResized_ = false;
 	bool renderResized_ = false;

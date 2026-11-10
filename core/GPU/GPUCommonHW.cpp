@@ -1055,9 +1055,6 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 
 	const uint32_t vtypeCheckMask = g_Config.bSoftwareSkinning ? (~GE_VTYPE_WEIGHTCOUNT_MASK) : 0xFFFFFFFF;
 
-	if (!useFastRunLoop_)
-		goto bail;  // we're either recording or stepping.
-
 	while (src != stall) {
 		uint32_t data = *src;
 		switch (data >> 24) {
@@ -1080,7 +1077,8 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 				}
 				src += commandsExecuted - 1;
 				gstate_c.vertexAddr += bytesRead;
-				totalVertCount += count;
+				// every PRIM taken, each charged as if run alone
+				totalVertCount += bytesRead / decoder->VertexSize();
 				break;
 			}
 
@@ -1211,9 +1209,10 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 			break;
 		case GE_CMD_CALL:
 		{
-			// A bone matrix probably. If not we bail.
-			const u32 target = gstate_c.getRelativeAddress(data & 0x00FFFFFC);
-			if ((Memory::ReadUnchecked_U32(target) >> 24) == GE_CMD_BONEMATRIXDATA &&
+			// A bone matrix probably. If not we bail. Read where a CALL reads it (one just copied into VRAM is still at its source).
+			const u32 target = g_vramAlias.listAddress(gstate_c.getRelativeAddress(data & 0x00FFFFFC));
+			if (Memory::IsValidRange(target, 13 * 4) &&
+				(Memory::ReadUnchecked_U32(target) >> 24) == GE_CMD_BONEMATRIXDATA &&
 				(Memory::ReadUnchecked_U32(target + 11 * 4) >> 24) == GE_CMD_BONEMATRIXDATA &&
 				(Memory::ReadUnchecked_U32(target + 12 * 4) >> 24) == GE_CMD_RET &&
 				(target > currentList->stall || target + 12 * 4 < currentList->stall) &&
@@ -1247,7 +1246,8 @@ bail:
 	const int cmdCount = src - start;
 	// Skip over the commands we just read out manually.
 	if (cmdCount > 0) {
-		UpdatePC(currentList->pc, currentList->pc + cmdCount * 4);
+		// the commands read here take the GE's time they would have taken run one by one
+		UpdatePC(currentList->pc + cmdCount * 4, currentList->pc + cmdCount * 4);
 		currentList->pc += cmdCount * 4;
 		// flush back cull mode
 		if (cullMode != gstate.getCullMode()) {
@@ -1509,8 +1509,8 @@ void GPUCommonHW::Execute_WorldMtxNum(u32 op, u32 diff) {
 	const int count = i;
 	gstate.worldmtxnum = (GE_CMD_WORLDMATRIXNUMBER << 24) | ((op & 0xF) + count);
 
-	// Skip over the loaded data, it's done now.
-	UpdatePC(currentList->pc, currentList->pc + count * 4);
+	// Skip over the loaded data, it's done now (its words still take the GE's time).
+	UpdatePC(currentList->pc + count * 4, currentList->pc + count * 4);
 	currentList->pc += count * 4;
 }
 
@@ -1562,8 +1562,8 @@ void GPUCommonHW::Execute_ViewMtxNum(u32 op, u32 diff) {
 	const int count = i;
 	gstate.viewmtxnum = (GE_CMD_VIEWMATRIXNUMBER << 24) | ((op & 0xF) + count);
 
-	// Skip over the loaded data, it's done now.
-	UpdatePC(currentList->pc, currentList->pc + count * 4);
+	// Skip over the loaded data, it's done now (its words still take the GE's time).
+	UpdatePC(currentList->pc + count * 4, currentList->pc + count * 4);
 	currentList->pc += count * 4;
 }
 
@@ -1615,8 +1615,8 @@ void GPUCommonHW::Execute_ProjMtxNum(u32 op, u32 diff) {
 	const int count = i;
 	gstate.projmtxnum = (GE_CMD_PROJMATRIXNUMBER << 24) | ((op & 0xF) + count);
 
-	// Skip over the loaded data, it's done now.
-	UpdatePC(currentList->pc, currentList->pc + count * 4);
+	// Skip over the loaded data, it's done now (its words still take the GE's time).
+	UpdatePC(currentList->pc + count * 4, currentList->pc + count * 4);
 	currentList->pc += count * 4;
 }
 
@@ -1670,8 +1670,8 @@ void GPUCommonHW::Execute_TgenMtxNum(u32 op, u32 diff) {
 	const int count = i;
 	gstate.texmtxnum = (GE_CMD_TGENMATRIXNUMBER << 24) | ((op & 0xF) + count);
 
-	// Skip over the loaded data, it's done now.
-	UpdatePC(currentList->pc, currentList->pc + count * 4);
+	// Skip over the loaded data, it's done now (its words still take the GE's time).
+	UpdatePC(currentList->pc + count * 4, currentList->pc + count * 4);
 	currentList->pc += count * 4;
 }
 
@@ -1758,8 +1758,8 @@ void GPUCommonHW::Execute_BoneMtxNum(u32 op, u32 diff) {
 	const int count = i;
 	gstate.boneMatrixNumber = (GE_CMD_BONEMATRIXNUMBER << 24) | ((op & 0x7F) + count);
 
-	// Skip over the loaded data, it's done now.
-	UpdatePC(currentList->pc, currentList->pc + count * 4);
+	// Skip over the loaded data, it's done now (its words still take the GE's time).
+	UpdatePC(currentList->pc + count * 4, currentList->pc + count * 4);
 	currentList->pc += count * 4;
 }
 
@@ -1786,7 +1786,7 @@ void GPUCommonHW::Execute_BoneMtxData(u32 op, u32 diff) {
 		gstate_c.deferredVertTypeDirty |= BoneMatricesDirty(num, count);
 		num += count;
 		if (count != 0) {
-			UpdatePC(currentList->pc, currentList->pc + count * 4);
+			UpdatePC(currentList->pc + count * 4, currentList->pc + count * 4);
 			currentList->pc += count * 4;
 		}
 	}
