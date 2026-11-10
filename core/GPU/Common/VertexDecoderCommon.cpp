@@ -1407,6 +1407,22 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		jitted_ = nweights == 1 ? &VtxDec_Wf1_Tu8_C4444_Ns8_Pf : &VtxDec_Wf2_Tu8_C4444_Ns8_Pf;
 		return;
 	}
+	// W: u8, one to three, skinned  T: u8 prescaled  N: s8  P: s16: Tekken 6's three most used skinned formats.
+	if (skinInDecode && nweights >= 1 && nweights <= 3 && numSteps_ == 4 && steps_[0] == &VertexDecoder::Step_WeightsU8Skin &&
+		steps_[1] == &VertexDecoder::Step_TcU8Prescale && steps_[2] == &VertexDecoder::Step_NormalS8Skin &&
+		steps_[3] == &VertexDecoder::Step_PosS16Skin && morphcount == 1 && weightoff == 0 && tcoff == nweights &&
+		nrmoff == nweights + 2 && posoff == (nweights == 1 ? 6 : 8) && VertexSize() == (nweights == 1 ? 12 : 14) &&
+		decFmt.stride == 32 && decFmt.uvoff == 0 && decFmt.nrmoff == 8 && decFmt.posoff == 20) {
+		jitted_ = nweights == 1 ? &VtxDec_Wu8x1_Tu8_Ns8_Ps16 : nweights == 2 ? &VtxDec_Wu8x2_Tu8_Ns8_Ps16 : &VtxDec_Wu8x3_Tu8_Ns8_Ps16;
+		return;
+	}
+	// T: u8 prescaled  C: 565  P: s16: Tekken 6's most used unskinned format.
+	if (numSteps_ == 3 && steps_[0] == &VertexDecoder::Step_TcU8Prescale && steps_[1] == &VertexDecoder::Step_Color565 &&
+		steps_[2] == &VertexDecoder::Step_PosS16 && morphcount == 1 && VertexSize() == 10 && tcoff == 0 && coloff == 2 && posoff == 4 &&
+		decFmt.stride == 24 && decFmt.uvoff == 0 && decFmt.c0off == 8 && decFmt.posoff == 12) {
+		jitted_ = &VdecHand_Tu8pre_C565_Ps16;
+		return;
+	}
 
 	// Only use the handwritten decoders if we have SSE or NEON. Don't want to use these on RISC-V, probably?
 	// See GetVertTypeID

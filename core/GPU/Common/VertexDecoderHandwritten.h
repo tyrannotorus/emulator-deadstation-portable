@@ -14,3 +14,10 @@ extern "C" int VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int co
 void VtxDec_Wf1_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
 extern "C" int VdecHand_Wf2_Tu8pre_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
 void VtxDec_Wf2_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+extern "C" void VdecHand_Wu8x1_Tu8pre_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
+extern "C" void VdecHand_Wu8x2_Tu8pre_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
+extern "C" void VdecHand_Wu8x3_Tu8pre_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset, const float *boneMatrix);
+void VtxDec_Wu8x1_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+void VtxDec_Wu8x2_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+void VtxDec_Wu8x3_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);
+extern "C" void VdecHand_Tu8pre_C565_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset);

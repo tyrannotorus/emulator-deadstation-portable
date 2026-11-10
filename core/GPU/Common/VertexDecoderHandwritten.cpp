@@ -53,6 +53,20 @@ void VtxDec_Wf2_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVSc
 		gstate_c.vertexFullAlpha = false;
 }
 
+// Tekken 6's skinned W u8 (1-3 weights) T u8 N s8 P s16: hand-written ARM64, two vertices a loop. Raw cycles a vertex
+// (local/brick/vdecbench/tkskin.c, against the JIT's own code: outputs identical, with what's written past them), source in L1 /
+// in 7-vertex calls (Tekken's average draw): 1x 30.8 / 39.0 against 68.9 / 76.7; 2x 39.4 / 50.1 against 76.5 / 86.4; 3x 48.2 / 63.4
+// against 81.2 / 93.2. (Its unskinned T u8 C 565 P s16, VdecHand_Tu8pre_C565_Ps16, takes no bones: 17.9 / 20.8 against 48.1 / 50.3.)
+void VtxDec_Wu8x1_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
+	VdecHand_Wu8x1_Tu8pre_Ns8_Ps16(srcp, dstp, count, uvScaleOffset, gstate.boneMatrix);
+}
+void VtxDec_Wu8x2_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
+	VdecHand_Wu8x2_Tu8pre_Ns8_Ps16(srcp, dstp, count, uvScaleOffset, gstate.boneMatrix);
+}
+void VtxDec_Wu8x3_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
+	VdecHand_Wu8x3_Tu8pre_Ns8_Ps16(srcp, dstp, count, uvScaleOffset, gstate.boneMatrix);
+}
+
 void VtxDec_Tu8_C5551_Ps16(const u8 *srcp, u8 *dstp, int numVerts, const UVScale *uvScaleOffset) {
 	struct GTAVTX {
 		union {
