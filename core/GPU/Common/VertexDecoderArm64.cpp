@@ -298,7 +298,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		}
 	}
 
-	// (after a pair loop this one runs at most once a call: no padding to fall through)
+	// (after a pair loop this runs at most once a call, straight through: no padding to fall through)
 	const u8 *loopStart = pair ? GetCodePtr() : NopAlignCode16();
 	// Deadstation Portable: a skinned vertex's normal and position loaded before anything else, into registers no step touches
 	// (Q12, Q13), so the loads complete while the weights blend the matrix; the position step then transforms both, interleaved
@@ -334,12 +334,17 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		}
 	}
 
-	ADDI2R(srcReg, srcReg, dec.VertexSize(), scratchReg);
-	ADDI2R(dstReg, dstReg, dec.decFmt.stride, scratchReg);
-	SUBS(counterReg, counterReg, 1);
-	B(CC_NEQ, loopStart);
-	if (pair)
+	// After a pair loop, at most one vertex is left: straight through, no loop (its backward branch, predicted taken and falling
+	// through every odd-count call, cost about what the pair saved in a 7-vertex call).
+	if (!pair) {
+		ADDI2R(srcReg, srcReg, dec.VertexSize(), scratchReg);
+		ADDI2R(dstReg, dstReg, dec.decFmt.stride, scratchReg);
+		SUBS(counterReg, counterReg, 1);
+		B(CC_NEQ, loopStart);
+	} else {
+		(void)loopStart;
 		SetJumpTarget(pairsDone);
+	}
 
 	if (updateFullAlpha) {
 		FixupBranch skip = CBZ(alphaNonFullReg);
