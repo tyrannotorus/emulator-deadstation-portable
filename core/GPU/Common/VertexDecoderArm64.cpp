@@ -923,9 +923,10 @@ bool VertexDecoderJitCache::PairSupported(const VertexDecoder &dec) const {
 			return false;
 		if (!IsStep(dec, 0, &V::Step_WeightsU8Skin) && !IsStep(dec, 0, &V::Step_WeightsU16Skin) && !IsStep(dec, 0, &V::Step_WeightsFloatSkin))
 			return false;
-		// float weights (3 or more) and a position, nothing else: no conversions for the pair to overlap, and bones 2 and 3 read
-		// from memory instead of kept in registers: measured slower (P f W f x4: 60.0 -> 66.1 cycles a vertex in 7-vertex calls)
-		if (IsStep(dec, 0, &V::Step_WeightsFloatSkin) && dec.nweights >= 3 && dec.numSteps_ == 2)
+		// float weights (4 or more) and a position, nothing else: no conversions for the pair to overlap, and bones 2 and 3 read
+		// from memory instead of kept in registers: measured slower or no better in 7-vertex calls (P f W f x4: 60.0 -> 66.1
+		// cycles a vertex, x5 80.7 -> 81.2; x3 53.9 -> 52.5 and faster from L1, so x3 pairs)
+		if (IsStep(dec, 0, &V::Step_WeightsFloatSkin) && dec.nweights >= 4 && dec.numSteps_ == 2)
 			return false;
 		static const StepFunction okSkin[] = {
 			&V::Step_TcU8Prescale, &V::Step_TcU16Prescale, &V::Step_TcFloatPrescale, &V::Step_TcU8ToFloat, &V::Step_TcU16ToFloat,
