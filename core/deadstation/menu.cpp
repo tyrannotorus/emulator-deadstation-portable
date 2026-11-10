@@ -317,11 +317,16 @@ bool showStart()
 	return ui::showStart("Loading...", fileName(st.rom));
 }
 
-void firstRunNotice(const std::function<bool()>& pressed)
+void firstRunNotice(const std::function<std::vector<std::pair<int, bool>>()>& events, const std::function<bool()>& done)
 {
 	// shaders are compiled as the game first needs them (a stutter, once) and kept per game for its next start (saved when the
 	// menu opens: GPU_Vulkan::SaveShaderCache)
-	ui::notice("First-time shader compilation may cause stutter. Compiled shaders are saved for re-use.", "Press any button", pressed);
+	ui::notice("First-time shader compilation may cause stutter. Compiled shaders are saved for re-use.", [&] {
+		for (const auto& [code, pressed] : events())
+			if (pressed && menuButton(code) == ui::Button::A)
+				return ui::Button::A;
+		return done() ? ui::Button::A : ui::Button::None;
+	});
 }
 
 bool starting()

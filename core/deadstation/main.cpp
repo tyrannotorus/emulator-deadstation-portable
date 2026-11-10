@@ -649,12 +649,7 @@ int main(int argc, char **argv)
 		const Path played = dir / (id + ".played");
 		if (!id.empty() && getenv("DEADSTATION_PORTABLE_STATE") == nullptr && !File::Exists(played))
 		{
-			menu::firstRunNotice([] {
-				for (const auto& [code, pressed] : padEvents())
-					if (pressed)
-						return true;
-				return quit.load();
-			});
+			menu::firstRunNotice(padEvents, [] { return quit.load(); });
 			File::CreateFullPath(dir);
 			File::CreateEmptyFile(played);
 		}

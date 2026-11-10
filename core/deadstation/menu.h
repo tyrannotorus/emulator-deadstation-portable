@@ -32,9 +32,9 @@ bool showStart();
 bool starting();
 void endStart();
 void showStartError(const std::string& what);
-// the first time a game runs, after the start page: a word about shader compilation's stutter, on its own page until pressed()
-// says a button went down
-void firstRunNotice(const std::function<bool()>& pressed);
+// the first time a game runs, after the start page: a word about shader compilation's stutter, on its own page until A among
+// the pad's presses (events: controls.h's input numbers, pressed or not); done() ends it early (the emulator quitting)
+void firstRunNotice(const std::function<std::vector<std::pair<int, bool>>()>& events, const std::function<bool()>& done);
 
 // the save state slot picked last (FN2/FN1 use it), saved and loaded from outside the menu
 bool saveSlot();
