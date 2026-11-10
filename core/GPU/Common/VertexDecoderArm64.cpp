@@ -272,6 +272,10 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		SUBS(counterReg, counterReg, 2);
 		FixupBranch noPairs = B(CC_LT);
 		const u8 *pairStart = NopAlignCode16();
+		// unskinned vertices of 24 bytes or more: the source 256 bytes ahead on its way (PRFM PLDL1KEEP, [X0, #256]): streamed,
+		// a 32-byte format was 1.4% slower than the old loop without it, both at the memory's limit
+		if (!dec.skinInDecode && dec.VertexSize() >= 24)
+			Write32(0xF9800000 | ((256 / 8) << 10) | (DecodeReg(srcReg) << 5));
 		if (posOnly)
 			Jit_PairSkinnedPosOnly(dec);
 		else if (dec.skinInDecode)
@@ -294,7 +298,8 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		}
 	}
 
-	const u8 *loopStart = NopAlignCode16();
+	// (after a pair loop this one runs at most once a call: no padding to fall through)
+	const u8 *loopStart = pair ? GetCodePtr() : NopAlignCode16();
 	// Deadstation Portable: a skinned vertex's normal and position loaded before anything else, into registers no step touches
 	// (Q12, Q13), so the loads complete while the weights blend the matrix; the position step then transforms both, interleaved
 	// (each was loaded and used at once before: the two stalls 21% of God of War's skinned decoder).
