@@ -811,7 +811,7 @@ int main(int argc, char **argv)
 				std::rename("/tmp/dsp-shot.ppm.tmp", "/tmp/dsp-shot.ppm");
 			}
 		}
-		// (tests) DEADSTATION_PORTABLE_STATE_EVERY=seconds: the test state loaded again that often (all the crashes seen followed a load)
+		// (tests) DEADSTATION_PORTABLE_STATE_EVERY=seconds: the test state loaded again that often
 		static const double stateEvery = getenv("DEADSTATION_PORTABLE_STATE_EVERY") ? atof(getenv("DEADSTATION_PORTABLE_STATE_EVERY")) : 0.0;
 		static std::string stateAgain;
 		static double stateAgainAt = 0.0;

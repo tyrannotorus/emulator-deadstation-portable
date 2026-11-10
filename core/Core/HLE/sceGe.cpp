@@ -209,8 +209,8 @@ static bool __GeHasHandler(int subIntrBase) {
 	return subIntrBase >= 0 && geIntrHandler != nullptr && (geIntrHandler->get(subIntrBase | PSP_GE_SUBINTR_FINISH) != nullptr || geIntrHandler->get(subIntrBase | PSP_GE_SUBINTR_SIGNAL) != nullptr);
 }
 
-// Lists with such a handler, enqueued and not yet finished as the game has seen it (its FINISH interrupt, a dequeue, a break):
-// the CPU thread's own count, where the GE's queue (GPUCommon::QueuedListsHave) is the GE's thread's, and changes as it runs.
+// Lists with such a handler, enqueued and not yet finished as the game has seen it (its FINISH interrupt, a dequeue, a break),
+// kept by the CPU thread itself: the GE thread's own queue changes as it runs.
 static u64 handlerListsOpen = 0;
 
 static void __GeListOpened(int listid, int subIntrBase) {

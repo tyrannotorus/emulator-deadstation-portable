@@ -814,9 +814,7 @@ void GPUCommonHW::FastRunLoop(DisplayList &list) {
 		return;
 	}
 
-	// Deadstation Portable: the loop is hand-written ARM64 (GeRunLoopArm64.cpp), the rules as they were in C++ here. Raw cycles a
-	// command on the A53 (local/brick/loopbench): unchanged 12.0 against the compiler's 19.5, changed 17.0 / 26.5, a handler
-	// call 27.6 / 32.5; Tekken 6's loop 9.9-10.3% of its CPU thread -> 8.5-9.2%.
+	// Deadstation Portable: the loop is hand-written ARM64 (GeRunLoopArm64.cpp), with the rules the C++ loop here had.
 	const GeLoopArgs args{ this, &list.pc, Memory::base, gstate.cmdmem, geHandlers_, (const u8 *)&geTable_, &gstate_c.dirty,
 		drawEngineCommon_->NumDrawCallsPtr(), &downcount, &GeFlushThunk };
 	GeRunLoop(&args);
@@ -1693,7 +1691,6 @@ void GPUCommonHW::Execute_TgenMtxData(u32 op, u32 diff) {
 
 // Deadstation Portable: a run of BONEMATRIXDATA words copied into the bone matrices (each word << 8), up to limit of them, four at a
 // time while all four are the command, the rest one by one; returns how many. The dirty bits for the run's matrices, once.
-// (It was a word at a time with the dirty flag stored back each word: Tekken 6, 3.7% of its GE thread in the handler.)
 static int CopyBoneMatrixRun(const u32_le *src, u32 *dst, int limit) {
 	int i = 0;
 #if PPSSPP_ARCH(ARM64_NEON)

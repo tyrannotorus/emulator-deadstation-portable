@@ -575,9 +575,8 @@ VkResult VulkanContext::CreateDevice(int physical_device) {
 	extensionsLookup_.ARM_rasterization_order_attachment_access = EnableDeviceExtension(VK_ARM_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_EXTENSION_NAME, 0);
 
 	extensionsLookup_.EXT_provoking_vertex = EnableDeviceExtension(VK_EXT_PROVOKING_VERTEX_EXTENSION_NAME, 0);
-	// Deadstation Portable: the draw engine pushes its images at each draw instead of a descriptor set a draw (the GE8300's driver:
-	// 700 draws, 3.0 ms of CPU a frame as sets, 1.65 with the uniform blocks in a kept set and the images pushed; local/brick/descbench.
-	// OutRun 2006 at 960x544: 52.4 -> 55.3 vblanks/s, its render thread 13% less CPU).
+	// Deadstation Portable: the draw engine pushes its images at each draw instead of allocating a descriptor set a draw, which
+	// costs the GE8300's driver far less CPU.
 	extensionsLookup_.KHR_push_descriptor = EnableDeviceExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, 0);
 
 	// Optional features

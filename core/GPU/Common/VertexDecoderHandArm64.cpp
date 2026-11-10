@@ -1,10 +1,8 @@
 // Deadstation Portable: vertex decoders in hand-written ARM64, for formats the JIT's step-by-step code decodes slowly.
 //
-// T: u16  N: s8  P: float (20 bytes in; 24 out: uv float2 at 0, normal s8 x3 + 0 at 8, position float3 at 12): OutRun 2006's
-// most used format (13% of its GE thread as the JIT emits it). Two vertices a loop, their uv chains interleaved; the normal and
-// position loaded as one 16-byte pair and stored as one; stores in address order (the destination is uncached Vulkan memory,
-// write-combined); the source prefetched 320 bytes ahead. Raw cycles a vertex on the A53 (local/brick/vdecbench), destination
-// in the Vulkan memory the emulator decodes into: source in L1 13.9 against the JIT's 33.2, source streamed from RAM 30.1 / 38.6.
+// T: u16  N: s8  P: float (20 bytes in; 24 out: uv float2 at 0, normal s8 x3 + 0 at 8, position float3 at 12). Two vertices a
+// loop, their uv chains interleaved; the normal and position loaded as one 16-byte pair and stored as one; stores in address
+// order (the destination is uncached, write-combined Vulkan memory); the source prefetched 320 bytes ahead.
 //   VdecHand_Tu16pre_Ns8_Pf: uv prescaled (uv * scale + offset, scale and offset from x3), the usual case
 //   VdecHand_Tu16_Ns8_Pf: uv / 32768 only (texture matrix uv generation)
 // void (const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset), as JittedVertexDecoder.
@@ -77,11 +75,10 @@ VDEC_TU16_NS8_PF("VdecHand_Tu16_Ns8_Pf",
 	"	ucvtf	v5.2s, v4.2s, #15\n",
 	"",
 	"	ucvtf	v2.2s, v3.2s, #15\n")
-// T: u16 (prescaled)  N: s8 (4 bytes as they are)  C: 8888  P: float (24 bytes in; 28 out: uv float2, normal, color, position):
-// God of War's, as VtxDec_Tu16_C8888_Pfloat in C++ (the same operations: uv converted, * (scale / 32768), + offset, not fused; alpha
-// the AND of every color + position vector's first lane). Two vertices a loop, their uv chains interleaved, stores in address
-// order (the compiled C++ stored color + position, then normal, then uv), the normal moved by an integer register, the source
-// prefetched. Returns 1 when every alpha is 0xFF.
+// T: u16 (prescaled)  N: s8 (4 bytes as they are)  C: 8888  P: float (24 bytes in; 28 out: uv float2, normal, color, position),
+// as VtxDec_Tu16_C8888_Pfloat in C++ (the same operations: uv converted, * (scale / 32768), + offset, not fused; alpha the AND
+// of every color + position vector's first lane). Two vertices a loop, their uv chains interleaved, stores in address order,
+// the normal moved by an integer register, the source prefetched. Returns 1 when every alpha is 0xFF.
 // int VdecHand_Tu16pre_N8_C8888_Pf(const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset)
 __asm__(
 	".text\n"
@@ -148,11 +145,11 @@ __asm__(
 	".size VdecHand_Tu16pre_N8_C8888_Pf, .-VdecHand_Tu16pre_N8_C8888_Pf\n"
 );
 // W: float (1x, skinned)  T: u8 (prescaled)  C: 4444  N: s8  P: float (24 bytes in; 36 out: uv float2 at 0, color at 8, normal
-// float3 at 12, position float3 at 24): God of War's most used skinned format. The JIT's own operations in its own order for each
-// value (the bone matrix rows masked to 3 lanes; matrix = bone * weight; normal = m0 * n.x, + m1 * n.y, + m2 * n.z; position the
-// same, + m3; uv = offset + uv * scale, fused; 4444 expanded as the JIT does), two vertices a loop: their blends, conversions and
-// four transform chains interleaved (one vertex at a time, the A53 waited on each chain), stores in address order as the JIT's
-// (the 16-byte normal and position stores included). Returns 0 when some alpha isn't 0xF (the caller clears vertexFullAlpha).
+// float3 at 12, position float3 at 24). The JIT's own operations in its own order for each value (the bone matrix rows masked to
+// 3 lanes; matrix = bone * weight; normal = m0 * n.x, + m1 * n.y, + m2 * n.z; position the same, + m3; uv = offset + uv * scale,
+// fused; 4444 expanded as the JIT does), two vertices a loop: their blends, conversions and four transform chains interleaved,
+// stores in address order as the JIT's (the 16-byte normal and position stores included). Returns 0 when some alpha isn't 0xF
+// (the caller clears vertexFullAlpha).
 // int VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf(const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset, const float *boneMatrix)
 // v0 uv scale, v1 uv offset, v16-v19 the bone's rows, v20-v23 / v24-v27 the two matrices, v28-v31 the four accumulators,
 // v8 / v9 the two positions (d8, d9 saved), w15 the alpha-not-full bits.
@@ -306,8 +303,8 @@ __asm__(
 	"	ret\n"
 	".size VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf, .-VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf\n"
 );
-// W: float (2x, skinned)  T: u8 (prescaled)  C: 4444  N: s8  P: float (28 bytes in; 36 out, as the 1x): God of War's second most
-// used skinned format. As VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf, the blend matrix = bone0 * w0, + bone1 * w1 (the JIT's order).
+// W: float (2x, skinned)  T: u8 (prescaled)  C: 4444  N: s8  P: float (28 bytes in; 36 out, as the 1x). As
+// VdecHand_Wf1_Tu8pre_C4444_Ns8_Pf, the blend matrix = bone0 * w0, + bone1 * w1 (the JIT's order).
 // v16-v19 / v20-v23 the two bones' rows, v10-v13 / v24-v27 the two vertices' matrices (d8-d13 saved), v28-v31 the accumulators.
 // int VdecHand_Wf2_Tu8pre_C4444_Ns8_Pf(const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset, const float *boneMatrix)
 __asm__(
@@ -485,9 +482,9 @@ __asm__(
 	".size VdecHand_Wf2_Tu8pre_C4444_Ns8_Pf, .-VdecHand_Wf2_Tu8pre_C4444_Ns8_Pf\n"
 );
 // W: u8 (1x, skinned)  T: u8 (prescaled)  N: s8  P: s16 (12 bytes in: W 0, T 1, N 3, P 6; 32 out: uv float2 0, normal float3 8,
-// position float3 20): Tekken 6's most used format. The JIT's operations in its order (matrix = bone * weight; normal and position
-// through it, position + its translation; uv * scale + offset fused), two vertices a loop: their four chains interleaved, the weight,
-// uv and normal converted from general registers one value each (the JIT widened each through 128-bit vectors), stores in address order.
+// position float3 20). The JIT's operations in its order (matrix = bone * weight; normal and position through it, position + its
+// translation; uv * scale + offset fused), two vertices a loop: their four chains interleaved, the weight, uv and normal
+// converted from general registers one value each, stores in address order.
 // v0-v3 uv scale u, v, offset u, v; v16-v19 the bone's rows; A: v4-v7 matrix, v8-v10 normal, v11 position, v24/v25 weight then uv;
 // B: v20-v23, v12-v14, v15, v26/v27; v28-v31 the chains (A normal, A position, B normal, B position). d8-d15 saved.
 // void VdecHand_Wu8x1_Tu8pre_Ns8_Ps16(const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset, const float *boneMatrix)
@@ -626,7 +623,7 @@ __asm__(
 	"	ret\n"
 	".size VdecHand_Wu8x1_Tu8pre_Ns8_Ps16, .-VdecHand_Wu8x1_Tu8pre_Ns8_Ps16\n"
 );
-// W: u8 (2x, skinned)  T: u8 (prescaled)  N: s8  P: s16 (14 bytes in: W 0, T 2, N 4, P 8; 32 out, as the 1x): Tekken 6's second.
+// W: u8 (2x, skinned)  T: u8 (prescaled)  N: s8  P: s16 (14 bytes in: W 0, T 2, N 4, P 8; 32 out, as the 1x).
 // The JIT's order: matrix = bone0 * w0, + bone1 * w1 (fused). Two bones in v16-v23 leave no room for scalar normals: they're widened
 // as the JIT does (one register a vertex). A: v4-v7 matrix, v8 normal, v9 position, v12/v13 weights then uv; B: v24-v27, v10, v11,
 // v14/v15; v28-v31 the chains; v0-v3 uv scale and offset. d8-d15 saved.
@@ -981,8 +978,8 @@ __asm__(
 	".size VdecHand_Wu8x3_Tu8pre_Ns8_Ps16, .-VdecHand_Wu8x3_Tu8pre_Ns8_Ps16\n"
 );
 
-// T: u8 (prescaled)  C: 565  P: s16 (10 bytes in: T 0, C 2, P 4; 24 out: uv float2 0, color 8888 8, position float3 12): Tekken 6's
-// unskinned format. The JIT's operations (uv * scale + offset fused; 565 widened to 8888 by the same shifts, alpha full), two vertices
+// T: u8 (prescaled)  C: 565  P: s16 (10 bytes in: T 0, C 2, P 4; 24 out: uv float2 0, color 8888 8, position float3 12). The
+// JIT's operations (uv * scale + offset fused; 565 widened to 8888 by the same shifts, alpha full), two vertices
 // a loop: the colors' integer work beside the conversions, uv from general registers, stores in address order.
 // void VdecHand_Tu8pre_C565_Ps16(const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset)
 __asm__(
@@ -1081,12 +1078,11 @@ __asm__(
 	".size VdecHand_Tu8pre_C565_Ps16, .-VdecHand_Tu8pre_C565_Ps16\n"
 );
 // T: u8 (prescaled)  C: 5551  P: s16 (10 bytes in; 24 out: uv float2 0, color 8888 8, position float3 12): upstream's C++ decoder
-// for this format (VtxDec_Tu8_C5551_Ps16, written for GTA), in ARM64 with its exact arithmetic, so the output is the same bits:
-// two vertices a loop as it did (uv * (scale / 128), + offset, not fused; its color expansion, (rgb << 5) & 0x070707 added; the
-// position stored as 16 bytes, 4 past the vertex), an odd last one as its scalar loop did (uv fused; RGBA5551ToRGBA8888's
-// (rgb >> 5) & 0x070707). Returns its full-alpha result (bit 15 of every color, the pairs' halves folded), which it assigned.
-// The JIT's own rounding differs (fused for every vertex), and Tekken 6's picture with it; this keeps the picture, faster than
-// both (local/brick/vdecbench/hand5551.c).
+// for this format (VtxDec_Tu8_C5551_Ps16) in ARM64 with its exact arithmetic, so the output is the same bits: two vertices a loop
+// as it did (uv * (scale / 128), + offset, not fused; its color expansion, (rgb << 5) & 0x070707 added; the position stored as
+// 16 bytes, 4 past the vertex), an odd last one as its scalar loop did (uv fused; RGBA5551ToRGBA8888's (rgb >> 5) & 0x070707).
+// Returns its full-alpha result (bit 15 of every color, the pairs' halves folded), which it assigned. The JIT rounds differently
+// (fused for every vertex), so this keeps the C++'s output.
 // int VdecHand_Tu8_C5551_Ps16(const u8 *src, u8 *dst, int count, const UVScale *uvScaleOffset)
 __asm__(
 	".text\n"

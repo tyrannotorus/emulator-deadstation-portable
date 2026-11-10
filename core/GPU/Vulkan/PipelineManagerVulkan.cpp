@@ -354,11 +354,10 @@ static VulkanPipeline *CreateVulkanPipeline(VulkanRenderManager *renderManager, 
 }
 
 // Deadstation Portable: the driver's own compiled pipelines, kept per game in their own file (discID.vkdriver, beside the
-// .vkshadercache, whose format stays PPSSPP's) and given back to the driver at the next start. Tekken 6, 279 pipelines: the
-// start's compile 22.7 s -> 0.3 s. Checked before the driver sees it: our header (this device, driver version and cache UUID,
-// the size, an XXH3 of the data), then the driver's own header; anything off and the driver starts empty. Written whole to a
-// .tmp, synced, then renamed over the old one, and only when the driver's data grew: it only adds what it compiles (its bytes come
-// back in another order each run, the same size: Tekken 6 gave its 6907764 back reordered).
+// .vkshadercache, whose format stays PPSSPP's) and given back to the driver at the next start. Checked before the driver sees
+// it: our header (this device, driver version and cache UUID, the size, an XXH3 of the data), then the driver's own header;
+// anything off and the driver starts empty. Written whole to a .tmp, synced, then renamed over the old one, and only when the
+// driver's data grew (it only adds what it compiles).
 namespace {
 struct DriverCacheHeader {
 	char magic[8];

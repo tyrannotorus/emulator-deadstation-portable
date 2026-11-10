@@ -52,8 +52,7 @@ public:
 
 	// FinishInitOnMainThread runs on the main thread, of course.
 	virtual void FinishInitOnMainThread() {}
-	// Deadstation Portable: the game's shader cache written now, if it has built anything since the cache was last read or
-	// written (the menu opening: the game is paused, so the wait for compiles in flight and the write cost it nothing)
+	// Deadstation Portable: the game's shader cache written now, if it has built anything since the cache was last read or written
 	virtual void SaveShaderCache() {}
 
 	virtual ~GPUCommon() {}

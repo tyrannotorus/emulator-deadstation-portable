@@ -10,8 +10,6 @@
 // Per command: unchanged and not FLAG_EXECUTE, nothing; changed, the state takes the word, then its handler or its dirty bits;
 // FLAG_FLUSHBEFOREONCHANGE with vertices queued, the draw engine's flush first. A handler: list.pc and downcount stored, called,
 // both read back (it may move the list or end it). One prefetch a 64-byte line, four lines ahead.
-// Raw cycles a command on the A53 at 1.8 GHz (local/brick/loopbench), against the compiled C++ loop it replaced: unchanged
-// 12.0 (19.5), changed 17.0 (26.5), a handler call 27.6 (32.5), a 60/25/15 mix 23.5 (32.5).
 #if defined(__aarch64__)
 __asm__(
 	".text\n"

@@ -273,8 +273,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		SUBS(counterReg, counterReg, 2);
 		FixupBranch noPairs = B(CC_LT);
 		const u8 *pairStart = NopAlignCode16();
-		// unskinned vertices of 24 bytes or more: the source 256 bytes ahead on its way (PRFM PLDL1KEEP, [X0, #256]): streamed,
-		// a 32-byte format was 1.4% slower than the old loop without it, both at the memory's limit
+		// unskinned vertices of 24 bytes or more: the source prefetched 256 bytes ahead (PRFM PLDL1KEEP, [X0, #256])
 		if (!dec.skinInDecode && dec.VertexSize() >= 24)
 			Write32(0xF9800000 | ((256 / 8) << 10) | (DecodeReg(srcReg) << 5));
 		if (posOnly)
@@ -302,8 +301,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 	// (after a pair loop this runs at most once a call, straight through: no padding to fall through)
 	const u8 *loopStart = pair ? GetCodePtr() : NopAlignCode16();
 	// Deadstation Portable: a skinned vertex's normal and position loaded before anything else, into registers no step touches
-	// (Q12, Q13), so the loads complete while the weights blend the matrix; the position step then transforms both, interleaved
-	// (each was loaded and used at once before: the two stalls 21% of God of War's skinned decoder).
+	// (Q12, Q13), so the loads complete while the weights blend the matrix; the position step then transforms both, interleaved.
 	skinPreload_ = dec.skinInDecode;
 	skinNormalPending_ = false;
 	if (skinPreload_) {
@@ -335,8 +333,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		}
 	}
 
-	// After a pair loop, at most one vertex is left: straight through, no loop (its backward branch, predicted taken and falling
-	// through every odd-count call, cost about what the pair saved in a 7-vertex call).
+	// After a pair loop at most one vertex is left: it runs straight through, without a loop branch.
 	if (!pair) {
 		ADDI2R(srcReg, srcReg, dec.VertexSize(), scratchReg);
 		ADDI2R(dstReg, dstReg, dec.decFmt.stride, scratchReg);
@@ -894,11 +891,10 @@ void VertexDecoderJitCache::Jit_WriteMatrixMul(int outOff, bool pos) {
 //
 // The one-vertex loop above runs each step's instructions as a chain: on the in-order A53 every load, conversion and multiply
 // waits for the one before it. Here each component's instructions for vertex A and for vertex B go into lists of their own, with
-// registers of their own, and the lists are emitted one instruction from each in turn: two independent chains (and integer
-// work beside vector work) for the core to dual-issue. The loads, conversions and stores are the old steps' (the same widths at
-// the same offsets, in the same order: A's stores, then B's), so the bytes written are the same, those past a vertex too; the
-// texture coordinates are converted from general registers (one cycle a value instead of two 128-bit widenings), with the same
-// fused multiply-add per lane. Measured against the old loop's code on the Brick (local/brick/vdecbench/skinbench.c).
+// registers of their own, and the lists are emitted one instruction from each in turn: two independent chains for the core to
+// dual-issue. The loads, conversions and stores are the old steps' (the same widths at the same offsets, in the same order: A's
+// stores, then B's), so the bytes written are the same, those past a vertex too; the texture coordinates are converted from
+// general registers, with the same fused multiply-add per lane.
 
 namespace {
 
@@ -984,8 +980,7 @@ void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
 	// A copy format: every step a plain copy to the same offset (float texture coordinates, 8888 color, float normal and
 	// position) and the decoded stride the vertex's size. Then the old loop's stores for a pair write the source's own bytes over
 	// one range with no gap ([0, the vertex size + one vertex's footprint): the footprint may run past the vertex, as its 16-byte
-	// copies do). Copied as such, 16 bytes at a time, the colors' alpha taken from the loaded blocks: 0400019c (P f C 8888) had
-	// 6 loads and 6 stores a pair, and stayed level with the old loop in 7-vertex calls.
+	// copies do), so the pair copies that range 16 bytes at a time and takes the colors' alpha from the loaded blocks.
 	{
 		bool copy = dec.VertexSize() == dec.decFmt.stride;
 		int end = 0, coloff = -1;

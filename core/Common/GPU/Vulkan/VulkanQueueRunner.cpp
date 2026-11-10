@@ -888,8 +888,7 @@ void VulkanQueueRunner::ApplyRenderPassMerge(std::vector<VKRStep *> &steps) {
 	// Deadstation Portable: the other way round, when a later pass can't come forward because it reads what the passes in between
 	// drew: the earlier pass's draws go to the front of the later one (the same order on the framebuffer, one pass less to store and
 	// load). Only when nothing in between reads the framebuffer (the scan stops there), nothing in between wrote what the earlier
-	// pass (or what came forward into it) reads, and the later pass neither clears nor reads its own framebuffer. OutRun 2006 at
-	// 960x544: its main pass, split around its reflection passes, one pass again (+3 vblanks/s); pictures identical in six games.
+	// pass (or what came forward into it) reads, and the later pass neither clears nor reads its own framebuffer.
 	auto sinkRenderStep = [](VKRStep *dst, VKRStep *src) {
 		dst->commands.insert(dst->commands.begin(), src->commands.begin(), src->commands.end());
 		dst->preTransitions.append(src->preTransitions);
