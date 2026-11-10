@@ -57,6 +57,13 @@ void VtxDec_Wf2_Tu8_C4444_Ns8_Pf(const u8 *srcp, u8 *dstp, int count, const UVSc
 // (local/brick/vdecbench/tkskin.c, against the JIT's own code: outputs identical, with what's written past them), source in L1 /
 // in 7-vertex calls (Tekken's average draw): 1x 30.8 / 39.0 against 68.9 / 76.7; 2x 39.4 / 50.1 against 76.5 / 86.4; 3x 48.2 / 63.4
 // against 81.2 / 93.2. (Its unskinned T u8 C 565 P s16, VdecHand_Tu8pre_C565_Ps16, takes no bones: 17.9 / 20.8 against 48.1 / 50.3.)
+// T u8 C 5551 P s16 (upstream's C++ decoder, written for GTA) in ARM64 with the C++'s exact arithmetic (VertexDecoderHandArm64.cpp):
+// the same bits, outputs and the alpha result, as the C++ (local/brick/vdecbench/hand5551.c). Cycles a vertex, C++ / JIT / this:
+// 7-vertex calls 39.2 / 25.8 / 22.6, from L1 19.5 / 19.9 / 18.9, streamed 20.0 / 20.1 / 19.0. As the C++, it assigns the flag.
+void VtxDec_Tu8_C5551_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
+	gstate_c.vertexFullAlpha = VdecHand_Tu8_C5551_Ps16(srcp, dstp, count, uvScaleOffset) != 0;
+}
+
 void VtxDec_Wu8x1_Tu8_Ns8_Ps16(const u8 *srcp, u8 *dstp, int count, const UVScale *uvScaleOffset) {
 	VdecHand_Wu8x1_Tu8pre_Ns8_Ps16(srcp, dstp, count, uvScaleOffset, gstate.boneMatrix);
 }

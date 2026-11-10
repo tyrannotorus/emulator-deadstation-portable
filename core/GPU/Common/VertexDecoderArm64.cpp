@@ -25,6 +25,7 @@
 #include "GPU/GPUState.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 
+#include <algorithm>
 #include <functional>
 #include <vector>
 
@@ -979,6 +980,85 @@ bool VertexDecoderJitCache::PairSupported(const VertexDecoder &dec) const {
 
 void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
 	typedef VertexDecoder V;
+
+	// A copy format: every step a plain copy to the same offset (float texture coordinates, 8888 color, float normal and
+	// position) and the decoded stride the vertex's size. Then the old loop's stores for a pair write the source's own bytes over
+	// one range with no gap ([0, the vertex size + one vertex's footprint): the footprint may run past the vertex, as its 16-byte
+	// copies do). Copied as such, 16 bytes at a time, the colors' alpha taken from the loaded blocks: 0400019c (P f C 8888) had
+	// 6 loads and 6 stores a pair, and stayed level with the old loop in 7-vertex calls.
+	{
+		bool copy = dec.VertexSize() == dec.decFmt.stride;
+		int end = 0, coloff = -1;
+		std::vector<std::pair<int, int>> spans;
+		for (int i = 0; i < dec.numSteps_ && copy; i++) {
+			const auto st = dec.steps_[i];
+			if (st == &V::Step_TcFloat || st == &V::Step_TcFloatThrough) {
+				copy = dec.tcoff == dec.decFmt.uvoff;
+				spans.push_back({ dec.tcoff, 8 });
+			} else if (st == &V::Step_Color8888) {
+				copy = dec.coloff == dec.decFmt.c0off;
+				coloff = dec.coloff;
+				spans.push_back({ dec.coloff, 4 });
+			} else if (st == &V::Step_NormalFloat) {
+				copy = dec.nrmoff == dec.decFmt.nrmoff;
+				spans.push_back({ dec.nrmoff, (dec.nrmoff & 7) == 0 && (dec.decFmt.nrmoff & 7) == 0 ? 16 : 12 });
+			} else if (st == &V::Step_PosFloat) {
+				copy = dec.posoff == dec.decFmt.posoff;
+				spans.push_back({ dec.posoff, (dec.posoff & 7) == 0 && (dec.decFmt.posoff & 7) == 0 ? 16 : 12 });
+			} else {
+				copy = false;
+			}
+		}
+		if (copy) {
+			// no gap: the spans, sorted, must tile [0, end)
+			std::sort(spans.begin(), spans.end());
+			for (auto &sp : spans) {
+				if (sp.first > end)
+					copy = false;
+				end = std::max(end, sp.first + sp.second);
+			}
+		}
+		const int total = dec.VertexSize() + end;
+		// only where it moves fewer pieces than copying field by field does (P f alone, a 16-byte copy a vertex already, doesn't)
+		int fieldOps = 0;
+		for (auto &sp : spans)
+			fieldOps += sp.second == 12 ? 2 : 1;
+		const int copyOps = total / 16 + (total % 16 == 12 ? 2 : total % 16 ? 1 : 0);
+		if (copy && (total & 3) == 0 && total <= 16 * 12 && copyOps < 2 * fieldOps) {
+			const int chunks = total / 16, rest = total % 16;
+			// loads, then the colors' alpha, then stores, in address order
+			for (int c = 0; c < chunks; c++)
+				fp.LDUR(128, (ARM64Reg)(Q18 + c), srcReg, c * 16);
+			const ARM64Reg tail = (ARM64Reg)(Q18 + chunks);
+			if (rest == 4) fp.LDUR(32, EncodeRegToSingle(tail), srcReg, chunks * 16);
+			else if (rest == 8) fp.LDUR(64, EncodeRegToDouble(tail), srcReg, chunks * 16);
+			else if (rest == 12) {
+				fp.LDUR(64, EncodeRegToDouble(tail), srcReg, chunks * 16);
+				fp.LDUR(32, (ARM64Reg)(S18 + chunks + 1), srcReg, chunks * 16 + 8);
+			}
+			if (coloff >= 0) {
+				for (int k = 0; k < 2; k++) {
+					const int at = k * dec.VertexSize() + coloff;
+					const ARM64Reg w = k == 0 ? W3 : W4;
+					if (at / 16 < chunks)
+						fp.UMOV(32, w, (ARM64Reg)(Q18 + at / 16), (at % 16) / 4);
+					else
+						LDUR(w, srcReg, at);
+					ORN(alphaNonFullReg, alphaNonFullReg, w, ArithOption(w, ST_ASR, 24));
+				}
+			}
+			for (int c = 0; c < chunks; c++)
+				fp.STUR(128, (ARM64Reg)(Q18 + c), dstReg, c * 16);
+			if (rest == 4) fp.STUR(32, EncodeRegToSingle(tail), dstReg, chunks * 16);
+			else if (rest == 8) fp.STUR(64, EncodeRegToDouble(tail), dstReg, chunks * 16);
+			else if (rest == 12) {
+				fp.STUR(64, EncodeRegToDouble(tail), dstReg, chunks * 16);
+				fp.STUR(32, (ARM64Reg)(S18 + chunks + 1), dstReg, chunks * 16 + 8);
+			}
+			return;
+		}
+	}
+
 	bool bounds = false;
 	for (int i = 0; i < dec.numSteps_; i++)
 		bounds = bounds || IsStep(dec, i, &V::Step_TcU16ThroughToFloat);
