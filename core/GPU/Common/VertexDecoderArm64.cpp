@@ -198,12 +198,15 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 
 	// Add code to convert matrices to 4x4.
 	// Later we might want to do this when the matrices are loaded instead.
+	// Deadstation Portable: two vertices a loop (Jit_Pair, Jit_PairSkinned); skinned, it reads bones 2 up from the array.
+	const bool pair = PairSupported(dec);
+	const int firstStoredBone = pair && dec.skinInDecode ? 2 : 4;
 	if (dec.skinInDecode) {
 		// Copying from R3 to R4
 		MOVP2R(X3, gstate.boneMatrix);
 		// This is only used with more than 4 weights, and points to the first of them.
-		if (dec.nweights > 4)
-			MOVP2R(X4, &bones[16 * 4]);
+		if (dec.nweights > firstStoredBone)
+			MOVP2R(X4, &bones[16 * firstStoredBone]);
 
 		// Construct a mask to zero out the top lane with.
 		fp.MVNI(32, Q3, 0);
@@ -231,7 +234,7 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 			fp.AND(matrixRow[2], Q6, Q3);
 			fp.AND(matrixRow[3], Q7, Q3);
 
-			if (i >= 4)
+			if (i >= firstStoredBone)
 				fp.ST1(32, 4, INDEX_POST, matrixRow[0], X4);
 		}
 	}
@@ -250,19 +253,24 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		LDRH(INDEX_UNSIGNED, boundsMaxVReg, scratchReg64, offsetof(KnownVertexBounds, maxV));
 	}
 
-	// Deadstation Portable: two vertices a loop first (Jit_Pair), this one-vertex loop after it for an odd last one.
-	const bool pair = PairSupported(dec);
+	// Deadstation Portable: two vertices a loop first (Jit_Pair, Jit_PairSkinned), this one-vertex loop after it for an odd last one.
 	FixupBranch pairsDone;
 	if (pair) {
 		if (prescaleStep) {
-			// v's scale and offset as scalars of their own (u's are S0 and S1, the low lanes of D0 and D1)
-			fp.INS(32, Q16, 0, Q0, 1);
-			fp.INS(32, Q17, 0, Q1, 1);
+			// v's scale and offset as scalars of their own (u's are S0 and S1, the low lanes of D0 and D1): Q16/Q17 unskinned,
+			// Q2/Q3 skinned (Q16 up hold bones there)
+			fp.INS(32, dec.skinInDecode ? Q2 : Q16, 0, Q0, 1);
+			fp.INS(32, dec.skinInDecode ? Q3 : Q17, 0, Q1, 1);
 		}
+		if (dec.skinInDecode && dec.nweights > 2)
+			MOVP2R(X8, &bones[16 * 2]);
 		SUBS(counterReg, counterReg, 2);
 		FixupBranch noPairs = B(CC_LT);
 		const u8 *pairStart = NopAlignCode16();
-		Jit_Pair(dec);
+		if (dec.skinInDecode)
+			Jit_PairSkinned(dec);
+		else
+			Jit_Pair(dec);
 		ADDI2R(srcReg, srcReg, dec.VertexSize() * 2, scratchReg);
 		ADDI2R(dstReg, dstReg, dec.decFmt.stride * 2, scratchReg);
 		SUBS(counterReg, counterReg, 2);
@@ -270,6 +278,13 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		SetJumpTarget(noPairs);
 		ADDI2R(counterReg, counterReg, 2, scratchReg);
 		pairsDone = CBZ(counterReg);
+		// the one-vertex loop keeps bones 2 and 3 in Q24-Q31, which the pair loop used
+		if (dec.skinInDecode && dec.nweights > 2) {
+			MOVP2R(X4, &bones[16 * 2]);
+			fp.LD1(32, 4, INDEX_POST, Q24, X4);
+			if (dec.nweights > 3)
+				fp.LD1(32, 4, INDEX_POST, Q28, X4);
+		}
 	}
 
 	const u8 *loopStart = NopAlignCode16();
@@ -895,9 +910,37 @@ bool IsStep(const VertexDecoder &dec, int i, StepFunction f) {
 }  // namespace
 
 bool VertexDecoderJitCache::PairSupported(const VertexDecoder &dec) const {
-	if (dec.skinInDecode || dec.morphcount != 1)
+	if (dec.morphcount != 1)
 		return false;
 	typedef VertexDecoder V;
+	if (dec.skinInDecode) {
+		if (dec.nweights < 1 || dec.nweights > 8 || dec.numSteps_ < 2 || dec.weightoff != 0)
+			return false;
+		if (!IsStep(dec, 0, &V::Step_WeightsU8Skin) && !IsStep(dec, 0, &V::Step_WeightsU16Skin) && !IsStep(dec, 0, &V::Step_WeightsFloatSkin))
+			return false;
+		// float weights (3 or more) and a position, nothing else: no conversions for the pair to overlap, and bones 2 and 3 read
+		// from memory instead of kept in registers: measured slower (P f W f x4: 60.0 -> 66.1 cycles a vertex in 7-vertex calls)
+		if (IsStep(dec, 0, &V::Step_WeightsFloatSkin) && dec.nweights >= 3 && dec.numSteps_ == 2)
+			return false;
+		static const StepFunction okSkin[] = {
+			&V::Step_TcU8Prescale, &V::Step_TcU16Prescale, &V::Step_TcFloatPrescale, &V::Step_TcU8ToFloat, &V::Step_TcU16ToFloat,
+			&V::Step_TcFloat,
+			&V::Step_Color8888, &V::Step_Color4444, &V::Step_Color565, &V::Step_Color5551,
+			&V::Step_NormalS8Skin, &V::Step_NormalS16Skin, &V::Step_NormalFloatSkin,
+			&V::Step_PosS8Skin, &V::Step_PosS16Skin, &V::Step_PosFloatSkin,
+		};
+		bool hasPos = false;
+		for (int i = 1; i < dec.numSteps_; i++) {
+			bool found = false;
+			for (StepFunction f : okSkin)
+				found = found || dec.steps_[i] == f;
+			if (!found)
+				return false;
+			hasPos = hasPos || IsStep(dec, i, &V::Step_PosS8Skin) || IsStep(dec, i, &V::Step_PosS16Skin) || IsStep(dec, i, &V::Step_PosFloatSkin);
+		}
+		return hasPos && dec.steps_[dec.numSteps_ - 1] != nullptr && (IsStep(dec, dec.numSteps_ - 1, &V::Step_PosS8Skin) ||
+			IsStep(dec, dec.numSteps_ - 1, &V::Step_PosS16Skin) || IsStep(dec, dec.numSteps_ - 1, &V::Step_PosFloatSkin));
+	}
 	static const StepFunction ok[] = {
 		&V::Step_TcU8Prescale, &V::Step_TcU16Prescale, &V::Step_TcFloatPrescale, &V::Step_TcU8ToFloat, &V::Step_TcU16ToFloat,
 		&V::Step_TcFloat,
@@ -1056,5 +1099,292 @@ void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
 	for (const PairOp &op : stores[0])
 		op();
 	for (const PairOp &op : stores[1])
+		op();
+}
+
+// Skinned, two vertices a loop, in phases (registers are reused between them, so phases follow one another; within one, the
+// lists are emitted one instruction from each in turn):
+//   1. the weights loaded and converted, the normal's and position's bytes loaded, the texture coordinates' bytes loaded;
+//   2. both blended matrices, bone by bone, A's and B's multiplies alternating (a bone from 2 up read once from the array for
+//      both), beside the colors' integer work;
+//   3. texture coordinates converted (into the weights' registers, free now), the normal and position converted;
+//   4. the four transforms (A's normal and position, B's), their multiplies alternating;
+//   5. A's stores, then B's, in the old order.
+// The old loop's operations in its order for each vertex (matrix = bone0 * w0, then + bone k * wk fused, in k order; then the
+// old transforms), so the same bits. Registers: V0/V1 the uv scale and offset pairs, V2/V3 v's as scalars, V16-V23 bones 0 and
+// 1, V28-V31 bone k >= 2 in phase 2 and the transforms' accumulators in 4. A: V4-V7 matrix, V8 normal, V9 position, V12/V13
+// weights then uv; B: V24-V27, V10, V11, V14/V15. GPRs: A's color W3-W5, uv W6/W7, one or two scalar weights W8/W9; B's W10, W11,
+// W13, W14/W15, W16/W17; X8 points at bone 2 when there are three or more.
+void VertexDecoderJitCache::Jit_PairSkinned(const VertexDecoder &dec) {
+	typedef VertexDecoder V;
+	const int n = dec.nweights;
+	const bool wU8 = IsStep(dec, 0, &V::Step_WeightsU8Skin), wU16 = IsStep(dec, 0, &V::Step_WeightsU16Skin);
+	const bool scalarWeights = (wU8 || wU16) && n <= 2;
+
+	struct Lane {
+		int s, d;
+		ARM64Reg M[4];
+		ARM64Reg nrm, pos;        // V (S/D/Q views)
+		ARM64Reg w0, w1;          // V: weights (vector: lanes; scalar: w0's lane 0 and w1's lane 0), then uv (S)
+		ARM64Reg gw0, gw1;        // W: scalar weights' bytes
+		ARM64Reg uvU, uvV;        // W
+		ARM64Reg c1, c2, c3;      // W
+		ARM64Reg accN, accP;      // V
+	};
+	Lane L[2] = {
+		{ 0, 0, { Q4, Q5, Q6, Q7 }, Q8, Q9, Q12, Q13, W8, W9, W6, W7, W3, W4, W5, Q28, Q29 },
+		{ dec.VertexSize(), dec.decFmt.stride, { Q24, Q25, Q26, Q27 }, Q10, Q11, Q14, Q15, W16, W17, W14, W15, W10, W11, W13, Q30, Q31 },
+	};
+	const ARM64Reg bone0[4] = { Q16, Q17, Q18, Q19 }, bone1[4] = { Q20, Q21, Q22, Q23 }, boneK[4] = { Q28, Q29, Q30, Q31 };
+	// weight k of a lane: its register and lane
+	auto weight = [&](const Lane &R, int k, ARM64Reg *reg, u8 *idx) {
+		if (scalarWeights) {
+			*reg = k == 0 ? R.w0 : R.w1;
+			*idx = 0;
+		} else {
+			*reg = k < 4 ? R.w0 : R.w1;
+			*idx = (u8)(k & 3);
+		}
+	};
+
+	std::vector<PairOp> p1[6], p2[3], p3[4], p4, st[2];
+	ARM64Reg normalStep = INVALID_REG;  // set when there is a normal
+	bool hasNormal = false;
+	int nrmKind = 0, posKind = 0;  // 8, 16, 32 (float)
+	for (int i = 1; i < dec.numSteps_; i++) {
+		if (IsStep(dec, i, &V::Step_NormalS8Skin)) { hasNormal = true; nrmKind = 8; }
+		else if (IsStep(dec, i, &V::Step_NormalS16Skin)) { hasNormal = true; nrmKind = 16; }
+		else if (IsStep(dec, i, &V::Step_NormalFloatSkin)) { hasNormal = true; nrmKind = 32; }
+		else if (IsStep(dec, i, &V::Step_PosS8Skin)) posKind = 8;
+		else if (IsStep(dec, i, &V::Step_PosS16Skin)) posKind = 16;
+		else if (IsStep(dec, i, &V::Step_PosFloatSkin)) posKind = 32;
+	}
+	(void)normalStep;
+
+	for (int k = 0; k < 2; k++) {
+		const Lane R = L[k];
+		std::vector<PairOp> &w = p1[k], &raw = p1[2 + k], &uvRaw = p1[4 + k];
+		std::vector<PairOp> &col = p2[1 + k], &uv = p3[k], &conv = p3[2 + k];
+		// 1. weights
+		if (wU8 || wU16) {
+			if (scalarWeights) {
+				const int fbits = wU8 ? 7 : 15;
+				for (int j = 0; j < n; j++) {
+					const ARM64Reg g = j == 0 ? R.gw0 : R.gw1, v = EncodeRegToSingle(j == 0 ? R.w0 : R.w1);
+					const int off = R.s + (wU8 ? j : j * 2);
+					w.push_back([=] { if (wU8) LDURB(g, srcReg, off); else LDURH(g, srcReg, off); });
+					w.push_back([=] { fp.UCVTF(v, g, fbits); });
+				}
+			} else {
+				// as the old step: the first four (over-read up to four), then the rest from +4 or +8
+				for (int part = 0; part < (n > 4 ? 2 : 1); part++) {
+					const int cnt = part == 0 ? std::min(n, 4) : n - 4;
+					const ARM64Reg q = part == 0 ? R.w0 : R.w1, d = EncodeRegToDouble(q);
+					if (wU8) {
+						const int bits = cnt == 1 ? 8 : cnt == 2 ? 16 : 32;
+						const int off = R.s + part * 4;
+						w.push_back([=] {
+							if (bits == 8) fp.LDUR(8, d, srcReg, off); else fp.LDUR(bits, d, srcReg, off);
+						});
+						w.push_back([=] { fp.UXTL(8, q, d); });
+						w.push_back([=] { fp.UXTL(16, q, d); });
+						w.push_back([=] { fp.UCVTF(32, q, q, 7); });
+					} else {
+						const int bits = cnt == 1 ? 16 : cnt == 2 ? 32 : 64;
+						const int off = R.s + part * 8;
+						w.push_back([=] { fp.LDUR(bits, d, srcReg, off); });
+						w.push_back([=] { fp.UXTL(16, q, d); });
+						w.push_back([=] { fp.UCVTF(32, q, q, 15); });
+					}
+				}
+			}
+		} else {
+			// float weights, loaded as the old step does (the over-read lanes unused)
+			const int bits0 = n == 1 ? 32 : n == 2 ? 64 : 128;
+			const ARM64Reg q0 = R.w0, q1 = R.w1;
+			w.push_back([=] { fp.LDUR(bits0, bits0 == 32 ? EncodeRegToSingle(q0) : bits0 == 64 ? EncodeRegToDouble(q0) : q0, srcReg, R.s); });
+			if (n > 4) {
+				const int bits1 = n == 5 ? 32 : n == 6 ? 64 : 128;
+				w.push_back([=] { fp.LDUR(bits1, bits1 == 32 ? EncodeRegToSingle(q1) : bits1 == 64 ? EncodeRegToDouble(q1) : q1, srcReg, R.s + 16); });
+			}
+		}
+		// 1. the normal's and position's bytes
+		if (hasNormal) {
+			const int off = R.s + dec.nrmoff;
+			raw.push_back([=] {
+				if (nrmKind == 8) fp.LDUR(32, EncodeRegToSingle(R.nrm), srcReg, off);
+				else if (nrmKind == 16) fp.LDUR(64, EncodeRegToDouble(R.nrm), srcReg, off);
+				else fp.LDUR(128, R.nrm, srcReg, off);
+			});
+		}
+		{
+			const int off = R.s + dec.posoff;
+			raw.push_back([=] {
+				if (posKind == 8) fp.LDUR(32, EncodeRegToSingle(R.pos), srcReg, off);
+				else if (posKind == 16) fp.LDUR(64, EncodeRegToDouble(R.pos), srcReg, off);
+				else fp.LDUR(128, R.pos, srcReg, off);
+			});
+		}
+		// texture coordinates and color, in step order (their stores are the first ones, in that order)
+		for (int i = 1; i < dec.numSteps_; i++) {
+			const bool tcU8Pre = IsStep(dec, i, &V::Step_TcU8Prescale), tcU16Pre = IsStep(dec, i, &V::Step_TcU16Prescale);
+			const bool tcU8 = IsStep(dec, i, &V::Step_TcU8ToFloat), tcU16 = IsStep(dec, i, &V::Step_TcU16ToFloat);
+			const ARM64Reg fU = EncodeRegToSingle(R.w0), fV = EncodeRegToSingle(R.w1);
+			if (tcU8Pre || tcU16Pre || tcU8 || tcU16) {
+				const bool wide = tcU16Pre || tcU16, pre = tcU8Pre || tcU16Pre;
+				const int off = R.s + dec.tcoff, fbits = wide ? 15 : 7;
+				uvRaw.push_back([=] { if (wide) LDURH(R.uvU, srcReg, off); else LDURB(R.uvU, srcReg, off); });
+				uvRaw.push_back([=] { if (wide) LDURH(R.uvV, srcReg, off + 2); else LDURB(R.uvV, srcReg, off + 1); });
+				uv.push_back([=] { fp.UCVTF(fU, R.uvU, fbits); });
+				uv.push_back([=] { fp.UCVTF(fV, R.uvV, fbits); });
+				if (pre) {
+					uv.push_back([=] { fp.FMADD(fU, fU, S0, S1); });
+					uv.push_back([=] { fp.FMADD(fV, fV, S2, S3); });
+				}
+				st[k].push_back([=] { fp.STP(32, INDEX_SIGNED, fU, fV, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_TcFloatPrescale)) {
+				const ARM64Reg rawD = EncodeRegToDouble(R.w0), out = EncodeRegToDouble(R.w1);
+				uv.push_back([=] { fp.LDUR(64, rawD, srcReg, R.s + dec.tcoff); });
+				uv.push_back([=] { fp.MOV(out, neonUVOffsetReg); });
+				uv.push_back([=] { fp.FMLA(32, out, rawD, neonUVScaleReg); });
+				st[k].push_back([=] { fp.STUR(64, out, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_TcFloat)) {
+				uvRaw.push_back([=] { LDP(INDEX_SIGNED, R.uvU, R.uvV, srcReg, R.s + dec.tcoff); });
+				st[k].push_back([=] { STP(INDEX_SIGNED, R.uvU, R.uvV, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_Color8888)) {
+				col.push_back([=] { LDUR(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
+				st[k].push_back([=] { STUR(R.c1, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_Color4444)) {
+				col.push_back([=] { LDURH(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ANDI2R(R.c2, R.c1, 0x000F); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x00F0); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 4)); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x0F00); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 8)); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0xF000); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 12)); });
+				col.push_back([=] { ORR(R.c1, R.c2, R.c2, ArithOption(R.c2, ST_LSL, 4)); });
+				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
+				st[k].push_back([=] { STUR(R.c1, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_Color565)) {
+				col.push_back([=] { LDURH(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ANDI2R(R.c2, R.c1, 0x001F); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0xF800); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 5)); });
+				col.push_back([=] { LSL(R.c3, R.c2, 3); });
+				col.push_back([=] { ORR(R.c2, R.c3, R.c2, ArithOption(R.c2, ST_LSR, 2)); });
+				col.push_back([=] { ANDI2R(R.c2, R.c2, 0xFFFF00FF); });
+				col.push_back([=] { LSR(R.c1, R.c1, 5); });
+				col.push_back([=] { ANDI2R(R.c1, R.c1, 0x003F); });
+				col.push_back([=] { LSL(R.c3, R.c1, 2); });
+				col.push_back([=] { ORR(R.c3, R.c3, R.c1, ArithOption(R.c1, ST_LSR, 4)); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 8)); });
+				col.push_back([=] { ORRI2R(R.c1, R.c2, 0xFF000000); });
+				st[k].push_back([=] { STUR(R.c1, dstReg, R.d + dec.decFmt.c0off); });
+			} else if (IsStep(dec, i, &V::Step_Color5551)) {
+				col.push_back([=] { LDURSH(R.c1, srcReg, R.s + dec.coloff); });
+				col.push_back([=] { ANDI2R(R.c2, R.c1, 0x001F); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x03E0); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 3)); });
+				col.push_back([=] { ANDI2R(R.c3, R.c1, 0x7C00); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c3, ArithOption(R.c3, ST_LSL, 6)); });
+				col.push_back([=] { LSR(R.c3, R.c2, 2); });
+				col.push_back([=] { ANDI2R(R.c3, R.c3, ~0x000000F8); });
+				col.push_back([=] { ANDI2R(R.c3, R.c3, ~0x0000F800); });
+				col.push_back([=] { ORR(R.c2, R.c3, R.c2, ArithOption(R.c2, ST_LSL, 3)); });
+				col.push_back([=] { ANDI2R(R.c1, R.c1, 0xFF000000); });
+				col.push_back([=] { ORR(R.c2, R.c2, R.c1); });
+				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
+				st[k].push_back([=] { STUR(R.c2, dstReg, R.d + dec.decFmt.c0off); });
+			}
+		}
+		// 3. the normal and position converted (as the old steps)
+		if (hasNormal && nrmKind != 32) {
+			const ARM64Reg q = R.nrm, d = EncodeRegToDouble(R.nrm), s1 = EncodeRegToSingle(R.nrm);
+			if (nrmKind == 8) {
+				conv.push_back([=] { fp.SXTL(8, d, s1); });
+				conv.push_back([=] { fp.SXTL(16, q, d); });
+				conv.push_back([=] { fp.SCVTF(32, q, q, 7); });
+			} else {
+				conv.push_back([=] { fp.SXTL(16, q, d); });
+				conv.push_back([=] { fp.SCVTF(32, q, q, 15); });
+			}
+		}
+		if (posKind != 32) {
+			const ARM64Reg q = R.pos, d = EncodeRegToDouble(R.pos), s1 = EncodeRegToSingle(R.pos);
+			if (posKind == 8) {
+				conv.push_back([=] { fp.SXTL(8, d, s1); });
+				conv.push_back([=] { fp.SXTL(16, q, d); });
+				conv.push_back([=] { fp.SCVTF(32, q, q, 7); });
+			} else {
+				conv.push_back([=] { fp.SXTL(16, q, d); });
+				conv.push_back([=] { fp.SCVTF(32, q, q, 15); });
+			}
+		}
+		// 5. the normal's and position's stores (the old transform's, last)
+		if (hasNormal)
+			st[k].push_back([=] { fp.STUR(128, R.accN, dstReg, R.d + dec.decFmt.nrmoff); });
+		st[k].push_back([=] { fp.STUR(128, R.accP, dstReg, R.d + dec.decFmt.posoff); });
+	}
+
+	// 2. both matrices, bone by bone
+	std::vector<PairOp> &mat = p2[0];
+	for (int b = 0; b < n; b++) {
+		const ARM64Reg *bone = b == 0 ? bone0 : b == 1 ? bone1 : boneK;
+		if (b >= 2) {
+			const int off = (b - 2) * 64;
+			mat.push_back([=] { fp.LDP(128, INDEX_SIGNED, Q28, Q29, X8, off); });
+			mat.push_back([=] { fp.LDP(128, INDEX_SIGNED, Q30, Q31, X8, off + 32); });
+		}
+		for (int c = 0; c < 4; c++) {
+			for (int k = 0; k < 2; k++) {
+				ARM64Reg wr; u8 wi;
+				weight(L[k], b, &wr, &wi);
+				const ARM64Reg m = L[k].M[c], br = bone[c];
+				if (b == 0)
+					mat.push_back([=] { fp.FMUL(32, m, br, wr, wi); });
+				else
+					mat.push_back([=] { fp.FMLA(32, m, br, wr, wi); });
+			}
+		}
+	}
+	// 4. the transforms: the old order for each accumulator, the four alternating
+	for (int j = 0; j < 3; j++) {
+		for (int k = 0; k < 2; k++) {
+			const Lane &R = L[k];
+			const ARM64Reg mj = R.M[j], nrm = R.nrm, pos = R.pos, aN = R.accN, aP = R.accP;
+			const u8 jj = (u8)j;
+			if (hasNormal)
+				p4.push_back([=] { if (jj == 0) fp.FMUL(32, aN, mj, nrm, 0); else fp.FMLA(32, aN, mj, nrm, jj); });
+			p4.push_back([=] { if (jj == 0) fp.FMUL(32, aP, mj, pos, 0); else fp.FMLA(32, aP, mj, pos, jj); });
+		}
+	}
+	for (int k = 0; k < 2; k++) {
+		const Lane &R = L[k];
+		const ARM64Reg aP = R.accP, m3 = R.M[3];
+		p4.push_back([=] { fp.FADD(32, aP, aP, m3); });
+	}
+
+	auto emitPhase = [](std::vector<PairOp> *lists, int count) {
+		size_t at[8]{};
+		for (bool any = true; any;) {
+			any = false;
+			for (int l = 0; l < count; l++) {
+				if (at[l] < lists[l].size()) {
+					lists[l][at[l]++]();
+					any = true;
+				}
+			}
+		}
+	};
+	emitPhase(p1, 6);
+	emitPhase(p2, 3);
+	emitPhase(p3, 4);
+	for (const PairOp &op : p4)
+		op();
+	for (const PairOp &op : st[0])
+		op();
+	for (const PairOp &op : st[1])
 		op();
 }
