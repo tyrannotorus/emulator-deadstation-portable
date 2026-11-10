@@ -344,6 +344,7 @@ __asm__(
 	"	b.lt	2f\n"
 	"	.p2align 4\n"
 	"1:\n"
+	"	prfm	pldl1keep, [x0, #256]\n"     /* four and a half pairs ahead (streamed: the JIT was 1% faster without it) */
 	"	ldr	d4, [x0]\n"                    /* weights */
 	"	ldr	d5, [x0, #28]\n"
 	"	ldur	s6, [x0, #12]\n"               /* normals */
