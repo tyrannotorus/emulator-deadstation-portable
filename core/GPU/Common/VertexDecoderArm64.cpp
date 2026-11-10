@@ -182,9 +182,14 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 	if (updateFullAlpha && (dec.VertexType() & GE_VTYPE_COL_MASK) == GE_VTYPE_COL_565)
 		updateFullAlpha = false;
 
+	// Deadstation Portable: two vertices a loop (Jit_Pair, Jit_PairSkinned); skinned, it reads bones 2 up from the array; with
+	// texture bounds tracked (W13-W16), its second vertex uses X19-X22, saved.
+	const bool pair = PairSupported(dec);
 	// GPRs 0-15 do not need to be saved.
 	// We don't use any higher GPRs than 16. So:
 	uint64_t regs_to_save = updateTexBounds ? 1 << 16 : 0;
+	if (pair && updateTexBounds)
+		regs_to_save |= (1 << 19) | (1 << 20) | (1 << 21) | (1 << 22);
 	// We only need to save Q8-Q15 if skinning is used.
 	uint64_t regs_to_save_fp = dec.skinInDecode ? Arm64Gen::ALL_CALLEE_SAVED_FP : 0;
 	// Only bother making stack space and setting up FP if there are saved regs.
@@ -198,8 +203,6 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 
 	// Add code to convert matrices to 4x4.
 	// Later we might want to do this when the matrices are loaded instead.
-	// Deadstation Portable: two vertices a loop (Jit_Pair, Jit_PairSkinned); skinned, it reads bones 2 up from the array.
-	const bool pair = PairSupported(dec);
 	const int firstStoredBone = pair && dec.skinInDecode ? 2 : 4;
 	if (dec.skinInDecode) {
 		// Copying from R3 to R4
@@ -902,6 +905,8 @@ const PairLane kPairLanes[2] = {
 	{ 0, 0, W6, W7, W3, W4, W5, W8, W9, S18, S19, S22, S24, S26, S27 },
 	{ 0, 0, W14, W15, W10, W11, W13, W16, W17, S20, S21, S23, S25, S28, S29 },
 };
+// lane B when texture bounds are tracked in W13-W16 (X19-X22 saved by the prologue then)
+const PairLane kPairLaneBWithBounds = { 0, 0, W19, W20, W10, W11, W21, W22, W17, S20, S21, S23, S25, S28, S29 };
 
 bool IsStep(const VertexDecoder &dec, int i, StepFunction f) {
 	return dec.steps_[i] == f;
@@ -943,28 +948,39 @@ bool VertexDecoderJitCache::PairSupported(const VertexDecoder &dec) const {
 	}
 	static const StepFunction ok[] = {
 		&V::Step_TcU8Prescale, &V::Step_TcU16Prescale, &V::Step_TcFloatPrescale, &V::Step_TcU8ToFloat, &V::Step_TcU16ToFloat,
-		&V::Step_TcFloat,
+		&V::Step_TcFloat, &V::Step_TcFloatThrough, &V::Step_TcU16ThroughToFloat,
 		&V::Step_Color8888, &V::Step_Color4444, &V::Step_Color565, &V::Step_Color5551,
 		&V::Step_NormalS8, &V::Step_NormalS16, &V::Step_NormalFloat,
-		&V::Step_PosS8, &V::Step_PosS16, &V::Step_PosFloat,
+		&V::Step_PosS8, &V::Step_PosS16, &V::Step_PosFloat, &V::Step_PosS8Through, &V::Step_PosS16Through, &V::Step_PosFloatThrough,
 	};
+	bool through = false, normal = false;
 	for (int i = 0; i < dec.numSteps_; i++) {
 		bool found = false;
 		for (StepFunction f : ok)
 			found = found || dec.steps_[i] == f;
 		if (!found)
 			return false;
+		through = through || IsStep(dec, i, &V::Step_PosS8Through) || IsStep(dec, i, &V::Step_PosS16Through) || IsStep(dec, i, &V::Step_PosFloatThrough);
+		normal = normal || IsStep(dec, i, &V::Step_NormalS8) || IsStep(dec, i, &V::Step_NormalS16) || IsStep(dec, i, &V::Step_NormalFloat);
 	}
-	return true;
+	// a through-mode position's z goes through a normal's register
+	return !(through && normal);
 }
 
 void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
 	typedef VertexDecoder V;
-	PairLane lanes[2] = { kPairLanes[0], kPairLanes[1] };
+	bool bounds = false;
+	for (int i = 0; i < dec.numSteps_; i++)
+		bounds = bounds || IsStep(dec, i, &V::Step_TcU16ThroughToFloat);
+	PairLane lanes[2] = { kPairLanes[0], bounds ? kPairLaneBWithBounds : kPairLanes[1] };
 	lanes[1].s = dec.VertexSize();
 	lanes[1].d = dec.decFmt.stride;
-	std::vector<PairOp> lists[8];  // per lane: texture coordinates, color, normal, position
+	std::vector<PairOp> lists[9];  // per lane: texture coordinates, color, normal, position; then the bounds (both lanes, in turn)
 	std::vector<PairOp> stores[2];
+	auto updateSide = [this](ARM64Reg src, CCFlags cc, ARM64Reg dst) {
+		CMP(src, dst);
+		CSEL(dst, src, dst, cc);
+	};
 
 	for (int k = 0; k < 2; k++) {
 		const PairLane R = lanes[k];
@@ -991,9 +1007,48 @@ void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
 				tc.push_back([=] { fp.MOV(out, neonUVOffsetReg); });
 				tc.push_back([=] { fp.FMLA(32, out, raw, neonUVScaleReg); });
 				st.push_back([=] { fp.STUR(64, out, dstReg, R.d + dec.decFmt.uvoff); });
-			} else if (IsStep(dec, i, &V::Step_TcFloat)) {
+			} else if (IsStep(dec, i, &V::Step_TcFloat) || IsStep(dec, i, &V::Step_TcFloatThrough)) {
 				tc.push_back([=] { LDP(INDEX_SIGNED, R.uvU, R.uvV, srcReg, R.s + dec.tcoff); });
 				st.push_back([=] { STP(INDEX_SIGNED, R.uvU, R.uvV, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_TcU16ThroughToFloat)) {
+				// the raw values (the old step's two loads), converted one each (the same values: integers to floats), the bounds
+				// updated in their own list (A's, then B's: compare and select pairs, nothing else between them sets flags)
+				const int off = R.s + dec.tcoff;
+				tc.push_back([=] { LDURH(R.uvU, srcReg, off); });
+				tc.push_back([=] { LDURH(R.uvV, srcReg, off + 2); });
+				tc.push_back([=] { fp.UCVTF(R.fU, R.uvU); });
+				tc.push_back([=] { fp.UCVTF(R.fV, R.uvV); });
+				std::vector<PairOp> &b = lists[8];
+				b.push_back([=] { updateSide(R.uvU, CC_LT, boundsMinUReg); });
+				b.push_back([=] { updateSide(R.uvU, CC_GT, boundsMaxUReg); });
+				b.push_back([=] { updateSide(R.uvV, CC_LT, boundsMinVReg); });
+				b.push_back([=] { updateSide(R.uvV, CC_GT, boundsMaxVReg); });
+				st.push_back([=] { fp.STP(32, INDEX_SIGNED, R.fU, R.fV, dstReg, R.d + dec.decFmt.uvoff); });
+			} else if (IsStep(dec, i, &V::Step_PosS8Through)) {
+				// 8-bit positions in through mode always decode to 0, depth included
+				st.push_back([=] { STUR(WZR, dstReg, R.d + dec.decFmt.posoff); });
+				st.push_back([=] { STUR(WZR, dstReg, R.d + dec.decFmt.posoff + 4); });
+				st.push_back([=] { STUR(WZR, dstReg, R.d + dec.decFmt.posoff + 8); });
+			} else if (IsStep(dec, i, &V::Step_PosS16Through)) {
+				// x and y (signed), then z (unsigned) through a general register, as the old step
+				pos.push_back([=] { fp.LDUR(32, R.pos, srcReg, R.s + dec.posoff); });
+				pos.push_back([=] { LDURH(R.n1, srcReg, R.s + dec.posoff + 4); });
+				pos.push_back([=] { fp.SXTL(16, EncodeRegToDouble(R.pos), R.pos); });
+				pos.push_back([=] { fp.SCVTF(32, EncodeRegToDouble(R.pos), EncodeRegToDouble(R.pos)); });
+				pos.push_back([=] { fp.SCVTF(R.pos2, R.n1); });
+				st.push_back([=] { fp.STUR(64, EncodeRegToDouble(R.pos), dstReg, R.d + dec.decFmt.posoff); });
+				st.push_back([=] { fp.STUR(32, R.pos2, dstReg, R.d + dec.decFmt.posoff + 8); });
+			} else if (IsStep(dec, i, &V::Step_PosFloatThrough)) {
+				// x and y copied, z clamped to 0-65535 as the old step does
+				const ARM64Reg z = EncodeRegToDouble(R.pos2);
+				pos.push_back([=] { fp.LDUR(64, EncodeRegToDouble(R.pos), srcReg, R.s + dec.posoff); });
+				pos.push_back([=] { fp.LDUR(32, z, srcReg, R.s + dec.posoff + 8); });
+				pos.push_back([=] { fp.FCVTZU(32, z, z); });
+				pos.push_back([=] { fp.UQXTN(16, z, z); });
+				pos.push_back([=] { fp.UXTL(16, z, z); });
+				pos.push_back([=] { fp.UCVTF(32, z, z); });
+				st.push_back([=] { fp.STUR(64, EncodeRegToDouble(R.pos), dstReg, R.d + dec.decFmt.posoff); });
+				st.push_back([=] { fp.STUR(32, z, dstReg, R.d + dec.decFmt.posoff + 8); });
 			} else if (IsStep(dec, i, &V::Step_Color8888)) {
 				col.push_back([=] { LDUR(R.c1, srcReg, R.s + dec.coloff); });
 				col.push_back([=] { ORN(alphaNonFullReg, alphaNonFullReg, R.c1, ArithOption(R.c1, ST_ASR, 24)); });
@@ -1086,10 +1141,10 @@ void VertexDecoderJitCache::Jit_Pair(const VertexDecoder &dec) {
 	}
 
 	// one instruction from each list in turn
-	size_t at[8]{};
+	size_t at[9]{};
 	for (bool any = true; any;) {
 		any = false;
-		for (int l = 0; l < 8; l++) {
+		for (int l = 0; l < 9; l++) {
 			if (at[l] < lists[l].size()) {
 				lists[l][at[l]++]();
 				any = true;
