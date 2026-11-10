@@ -642,21 +642,19 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	// The first time this game runs (never in tests): a word about shader compilation's stutter, on its own page until a button.
-	// Played once, a game is marked so in its cache folder (<disc ID>.played), whether or not it ever keeps shaders; one played
-	// before this notice was has its compiled code or shaders there already.
+	// Seen once, a game is marked so in its cache folder (<disc ID>.played), whether or not it ever keeps shaders.
 	{
 		const Path dir = GetSysDirectory(DIRECTORY_APP_CACHE);
 		const std::string id = g_paramSFO.GetDiscID();
 		const Path played = dir / (id + ".played");
 		if (!id.empty() && getenv("DEADSTATION_PORTABLE_STATE") == nullptr && !File::Exists(played))
 		{
-			if (!File::Exists(dir / (id + ".vkshadercache")) && !File::Exists(dir / (id + ".jitblocks")))
-				menu::firstRunNotice([] {
-					for (const auto& [code, pressed] : padEvents())
-						if (pressed)
-							return true;
-					return quit.load();
-				});
+			menu::firstRunNotice([] {
+				for (const auto& [code, pressed] : padEvents())
+					if (pressed)
+						return true;
+				return quit.load();
+			});
 			File::CreateFullPath(dir);
 			File::CreateEmptyFile(played);
 		}
