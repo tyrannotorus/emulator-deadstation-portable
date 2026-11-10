@@ -9,8 +9,9 @@
     "tg5040"
   ],
   "launch": "launch.sh",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "changelog": {
+    "1.1.0": "- Faster graphics: quicker vertex decoding and GE command processing.\n- Much faster game starts: compiled shaders kept per game.\n- Consistent emulation: the same game timing on every run.\n- A one-time notice about first-run shader stutter.",
     "1.0.0": "- Many PSP games run close to full-speed."
   }
 }

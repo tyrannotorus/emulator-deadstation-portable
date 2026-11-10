@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 # Deadstation Portable: PPSSPP's emulation (core/) for the TrimUI Brick (NextUI, tg5040). Brick only: build with
 # shell/brick/build.sh, which passes ui/toolchain/tg5040.cmake as the toolchain file.
-project(deadstation-portable VERSION 1.0.0 LANGUAGES C CXX ASM)
+project(deadstation-portable VERSION 1.1.0 LANGUAGES C CXX ASM)
 
 # The Brick's four Cortex-A53 are r0p4 (/proc/cpuinfo): Arm's errata 835769 (multiply-accumulate, fixed by the compiler)
 # and 843419 (ADRP at a page's end, fixed by the linker) apply to them.
