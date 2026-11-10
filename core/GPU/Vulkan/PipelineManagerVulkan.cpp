@@ -376,11 +376,9 @@ void PipelineManagerVulkan::SetDriverCachePath(const Path &path) {
 VkPipelineCache PipelineManagerVulkan::CreateDriverCache() {
 	const VkPhysicalDeviceProperties &props = vulkan_->GetPhysicalDeviceProperties().properties;
 	std::vector<uint8_t> data;
-	const char *verdict = "none yet";
 	if (driverCachePath_.Valid()) {
 		if (FILE *f = File::OpenCFile(driverCachePath_, "rb")) {
 			DriverCacheHeader h{};
-			verdict = "not this device's or driver's: not used";
 			if (fread(&h, sizeof(h), 1, f) == 1 && !memcmp(h.magic, kDriverCacheMagic, sizeof(h.magic)) && h.version == 1 &&
 				h.vendorID == props.vendorID && h.deviceID == props.deviceID && h.driverVersion == props.driverVersion &&
 				!memcmp(h.uuid, props.pipelineCacheUUID, VK_UUID_SIZE) &&
@@ -388,15 +386,12 @@ VkPipelineCache PipelineManagerVulkan::CreateDriverCache() {
 				data.resize(h.size);
 				if (fread(data.data(), 1, h.size, f) != h.size || XXH3_64bits(data.data(), h.size) != h.hash) {
 					data.clear();
-					verdict = "damaged: not used";
 				} else {
 					VkPipelineCacheHeaderVersionOne vh;
 					memcpy(&vh, data.data(), sizeof(vh));
 					if (vh.headerSize < sizeof(vh) || vh.headerSize > h.size || vh.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE ||
 						vh.vendorID != props.vendorID || vh.deviceID != props.deviceID || memcmp(vh.pipelineCacheUUID, props.pipelineCacheUUID, VK_UUID_SIZE)) {
 						data.clear();
-					} else {
-						verdict = "given to the driver";
 					}
 				}
 			}
@@ -409,15 +404,12 @@ VkPipelineCache PipelineManagerVulkan::CreateDriverCache() {
 	VkPipelineCache cache = VK_NULL_HANDLE;
 	VkResult res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &cache);
 	if (res != VK_SUCCESS && !data.empty()) {
-		verdict = "refused by the driver: not used";
 		data.clear();
 		pc.pInitialData = nullptr;
 		pc.initialDataSize = 0;
 		res = vkCreatePipelineCache(vulkan_->GetDevice(), &pc, nullptr, &cache);
 	}
 	driverCacheSize_ = data.size();
-	if (driverCachePath_.Valid())
-		NOTICE_LOG(Log::G3D, "Driver pipeline cache: %s (%d bytes)", verdict, (int)data.size());
 	return res == VK_SUCCESS ? cache : VK_NULL_HANDLE;
 }
 
@@ -430,10 +422,8 @@ void PipelineManagerVulkan::SaveDriverCache() {
 	std::vector<uint8_t> data(bytes);
 	if (vkGetPipelineCacheData(vulkan_->GetDevice(), pipelineCache_, &bytes, data.data()) != VK_SUCCESS)
 		return;
-	if (bytes == driverCacheSize_) {
-		NOTICE_LOG(Log::G3D, "Driver pipeline cache: nothing new (%d bytes)", (int)bytes);
+	if (bytes == driverCacheSize_)
 		return;
-	}
 	const uint64_t hash = XXH3_64bits(data.data(), bytes);
 	const VkPhysicalDeviceProperties &props = vulkan_->GetPhysicalDeviceProperties().properties;
 	DriverCacheHeader h{};
@@ -454,7 +444,6 @@ void PipelineManagerVulkan::SaveDriverCache() {
 	ok = fclose(f) == 0 && ok;
 	if (ok && File::Rename(tmp, driverCachePath_)) {
 		driverCacheSize_ = bytes;
-		NOTICE_LOG(Log::G3D, "Driver pipeline cache: saved (%d bytes)", (int)bytes);
 	} else {
 		File::Delete(tmp, true);
 		WARN_LOG(Log::G3D, "Driver pipeline cache: not saved");

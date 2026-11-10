@@ -38,8 +38,6 @@ void runLists(u64 ticks);
 void runListsHere(u64 ticks);
 // a list's stall moved, the lists then run from it at ticks (the CPU's time, as each run's interrupts are timed from it)
 void updateStall(int listid, u32 stall, u64 ticks);
-// what the GE has for the game and has been released to it (sync, endFrame), delivered without waiting for the rest
-void deliver();
 // has anything been posted whose events the game hasn't been given yet
 bool unreleased();
 void display(u32 framebuf, u32 stride, GEBufferFormat format);
@@ -81,8 +79,6 @@ auto invoke(F what) -> decltype(what())
 // GE thread: for the CPU thread
 void postInterrupt(int listid, u32 pc, u64 atTicks);
 void postSync(GPUSyncType type, int id, u64 atTicks);
-// CPU thread
-extern std::atomic<bool> eventsWaiting;
 // GE interrupts when the GE's thread has got to them: lists the game has handlers for run there too, the CPU going on, and what
 // they raise reaches the game at the next point of its clock that waits for the GE (a sync, the next frame's end, idle with such
 // a list open: idleSync), late by a set amount of the game's time. Off: the CPU waits for such lists (runListsHere) and the stall

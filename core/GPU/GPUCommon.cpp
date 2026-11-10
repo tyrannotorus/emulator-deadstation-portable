@@ -698,15 +698,6 @@ bool GPUCommon::ListsQueued() {
 	return !dlQueue.empty();
 }
 
-bool GPUCommon::QueuedListsHave(bool (*handler)(int subIntrBase)) {
-	std::lock_guard<std::mutex> lock(queueLock_);
-	for (int i : dlQueue) {
-		if (handler(dls[i].subIntrBase))
-			return true;
-	}
-	return false;
-}
-
 DLResult GPUCommon::ProcessDLQueue(u64 ticks) {
 	// The game may look at VRAM once it has been told a list has got this far.
 	struct Uploads { ~Uploads() { g_vramAlias.materialize(); } } uploads;

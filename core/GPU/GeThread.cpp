@@ -233,9 +233,11 @@ bool onThread()
 	return std::this_thread::get_id() == threadId;
 }
 
+// what the GE has raised that the CPU thread hasn't handed to the game yet
+std::atomic<bool> eventsWaiting { false };
+
 }	// namespace
 
-std::atomic<bool> eventsWaiting { false };
 bool lateEvents = false;
 int lateMode = -1;
 
@@ -320,12 +322,6 @@ void updateStall(int listid, u32 stall, u64 ticks)
 	c.c = listid;
 	c.ticks = ticks;
 	post(c);
-}
-
-void deliver()
-{
-	if (eventsWaiting.load(std::memory_order_relaxed))
-		deliverEvents();
 }
 
 bool unreleased()

@@ -138,7 +138,6 @@ struct GPUStatistics {
 	int numTextureInvalidations;
 	int numTextureInvalidationsByFramebuffer;
 	int numTexturesHashed;
-	int numRehashesChanged = 0;  // Deadstation Portable: full rehashes that found the texture changed
 	int numTextureDataBytesHashed;
 	int numTexturesDecoded;
 	int numFramebufferEvaluations;

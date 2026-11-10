@@ -119,10 +119,8 @@ bool VKRGraphicsPipeline::Create(VulkanContext *vulkan, VkRenderPass compatibleR
 	pipe.subpass = 0;
 
 	double start = time_now_d();
-	const double cpuStart = DsThreadCpuMs();
 	VkPipeline vkpipeline;
 	VkResult result = vkCreateGraphicsPipelines(vulkan->GetDevice(), desc->pipelineCache, 1, &pipe, nullptr, &vkpipeline);
-	DsCompileStatAdd(g_dsPipe, DsThreadCpuMs() - cpuStart);
 
 	double now = time_now_d();
 	double taken_ms_since_scheduling = (now - scheduleTime) * 1000.0;
@@ -290,22 +288,6 @@ int CreateMultiPipelinesTask::WaitForAll() {
 }
 
 std::atomic<int> CreateMultiPipelinesTask::tasksInFlight_;
-
-// Deadstation Portable: pipeline and shader module compiles (the compiling thread's CPU time), and the render thread's waits for
-// them (wall time): the log's "compile:" line, once a second when there were any
-DsCompileStat g_dsPipe, g_dsSpv, g_dsWait;
-double DsThreadCpuMs() {
-	timespec t;
-	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
-	return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
-}
-void DsCompileStatAdd(DsCompileStat &s, double ms) {
-	const uint32_t us = (uint32_t)(ms * 1000.0);
-	s.n.fetch_add(1);
-	s.us.fetch_add(us);
-	uint32_t m = s.maxUs.load();
-	while (us > m && !s.maxUs.compare_exchange_weak(m, us)) {}
-}
 
 VulkanRenderManager::VulkanRenderManager(VulkanContext *vulkan, bool useThread, HistoryBuffer<FrameTimeData, FRAME_TIME_HISTORY_LENGTH> &frameTimeHistory)
 	: vulkan_(vulkan), queueRunner_(vulkan),

@@ -582,7 +582,6 @@ static int sceGeListUpdateStallAddr(u32 displayListID, u32 stallAddress) {
 	const u32 newStall = stallAddress & 0x0FFFFFFF;
 	if (ge::active() && listid >= 0 && listid < GeListCount && (ge::lateEvents || __GeQuietCommands(stallWalk[listid], cpuStall[listid], newStall))) {
 		// LEGO moves its stall ~80 times a frame: the CPU waited for the GE's thread each time (7.8 ms a vblank)
-		ge::deliver();
 		hleEatCycles(190);
 		hleCoreTimingForceCheck();
 		const u32 retval = gpu->UpdateStallResult(listid);

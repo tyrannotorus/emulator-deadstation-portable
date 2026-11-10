@@ -94,7 +94,6 @@ public:
 	DLResult ProcessDLQueue(u64 ticks);
 	// the queue, seen from the CPU thread while the GE's runs
 	bool ListsQueued();
-	bool QueuedListsHave(bool (*handler)(int subIntrBase));
 
 	u32 UpdateStall(int listid, u32 newstall, bool *runList);
 	// Deadstation Portable: what UpdateStall would return, read on the CPU thread while the GE's thread may be running the list's

@@ -815,7 +815,6 @@ int main(int argc, char **argv)
 		static const double stateEvery = getenv("DEADSTATION_PORTABLE_STATE_EVERY") ? atof(getenv("DEADSTATION_PORTABLE_STATE_EVERY")) : 0.0;
 		static std::string stateAgain;
 		static double stateAgainAt = 0.0;
-		static int stateLoads = 0;
 		if (testState != nullptr && *testState != '\0' && perfFrames > 0)
 		{
 			ge::pause();
@@ -831,8 +830,7 @@ int main(int argc, char **argv)
 		else if (!stateAgain.empty() && time_now_d() >= stateAgainAt)
 		{
 			ge::pause();
-			const bool loaded = states::load(stateAgain);
-			DS_LOG("test: state loaded again (%d): %s", ++stateLoads, loaded ? "yes" : "NO");
+			states::load(stateAgain);
 			stateAgainAt = time_now_d() + stateEvery;
 			audio::clear();
 			__DisplaySetWasPaused();
@@ -952,20 +950,6 @@ int main(int argc, char **argv)
 						(flips - flipsFrom) / span, (vblanks - vblanksFrom) / span, (double)(shown - shownFrom) / span, perfFrames, runWorst * 1000.0,
 						audio::level(), audio::takeUnderruns(), audio::takeDropped(), (unsigned)(held - heldFrom), CoreTiming::GetClockFrequencyHz() / 1000000,
 						(gpuStats.numFlips - madeFrom) / span, brickKhz / 1000);
-				// what the frames drew, a frame on average (the counters only grow; unsigned differences survive their wrapping)
-				{
-					static GPUStatistics was = gpuStats;
-					const unsigned frames = (unsigned)(gpuStats.numFlips - was.numFlips);
-					if (frames > 0) {
-						const auto per = [&](int now, int then) { return (double)(unsigned)(now - then) / frames; };
-						DS_LOG("draws: a frame %.0f flushes, %.0f draws (%.0f vertex decodes), %.0f vertices decoded, %.0f drawn, %.1f textures rehashed (%.0f KB, %.2f changed)",
-							per(gpuStats.numFlushes, was.numFlushes), per(gpuStats.numDrawCalls, was.numDrawCalls), per(gpuStats.numVertexDecodes, was.numVertexDecodes),
-							per(gpuStats.numVertsDecoded, was.numVertsDecoded), per(gpuStats.numVertsSubmitted, was.numVertsSubmitted),
-							per(gpuStats.numTexturesHashed, was.numTexturesHashed), per(gpuStats.numTextureDataBytesHashed, was.numTextureDataBytesHashed) / 1024.0,
-							per(gpuStats.numRehashesChanged, was.numRehashesChanged));
-					}
-					was = gpuStats;
-				}
 				madeFrom = gpuStats.numFlips;
 				heldFrom = held;
 				if (g_Config.bAutoFrameSkip) {
@@ -976,15 +960,6 @@ int main(int argc, char **argv)
 					float waitMs = 0.f, lateMean = 0.f, lateWorst = 0.f;
 					__DisplayTakeSkipCounts(&skipCount, &waitCount, &waitMs, &lateMean, &lateWorst);
 					DS_LOG("skip: a second of the game's time took %.3f s drawn, %.3f s skipped; skipping %s; %d skipped (at %.1f ms late, worst %.1f), %d waited %.0f ms in all", drawnCost, skippedCost, skipOn ? "allowed" : "off", skipCount, lateMean, lateWorst, waitCount, waitMs);
-				}
-				if (g_dsPipe.n.load() || g_dsSpv.n.load() || g_dsWait.n.load()) {
-					const auto take = [](DsCompileStat &s, uint32_t *n, double *ms, double *maxMs) {
-						*n = s.n.exchange(0); *ms = s.us.exchange(0) / 1000.0; *maxMs = s.maxUs.exchange(0) / 1000.0;
-					};
-					uint32_t pn, sn, wn; double pms, pmax, sms, smax, wms, wmax;
-					take(g_dsPipe, &pn, &pms, &pmax); take(g_dsSpv, &sn, &sms, &smax); take(g_dsWait, &wn, &wms, &wmax);
-					DS_LOG("compile: %u pipelines %.0f ms CPU (longest %.1f), %u shaders to SPIR-V %.0f ms CPU (longest %.1f); the render thread waited for them %u times, %.0f ms (longest %.1f)",
-						pn, pms, pmax, sn, sms, smax, wn, wms, wmax);
 				}
 				flipsFrom = flips;
 				vblanksFrom = vblanks;

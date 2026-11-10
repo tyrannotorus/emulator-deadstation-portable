@@ -193,15 +193,11 @@ int GPU_Vulkan::CacheCount() const {
 void GPU_Vulkan::SaveShaderCache() {
 	if (!shaderCachePath_.Valid() || !draw_)
 		return;
-	const double start = time_now_d();
 	VulkanRenderManager *rm = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
 	rm->WaitForPipelines();
-	const int count = CacheCount(), before = savedCount_;
-	if (count == before)
+	if (CacheCount() == savedCount_)
 		return;
 	SaveCache(shaderCachePath_);
-	std::fprintf(stderr, "Deadstation Portable: shader cache: %s, %d shaders and pipelines (%d before), %.0f ms\n", savedCount_ == count ? "saved" : "NOT saved",
-		count, before, (time_now_d() - start) * 1000.0);
 }
 
 GPU_Vulkan::~GPU_Vulkan() {
