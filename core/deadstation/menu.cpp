@@ -314,7 +314,9 @@ Result frame()
 
 bool showStart()
 {
-	return ui::showStart("Loading...", fileName(st.rom));
+	// shaders are compiled as the game first needs them (a stutter, once) and kept per game for its next start (saved when the
+	// menu opens: GPU_Vulkan::SaveShaderCache)
+	return ui::showStart("Loading...", fileName(st.rom), "Shader compilation may cause gameplay stutter\nShaders are saved for next time");
 }
 
 bool starting()

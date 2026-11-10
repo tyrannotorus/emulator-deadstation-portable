@@ -766,6 +766,8 @@ int main(int argc, char **argv)
 		{
 			ge::pause();
 			audio::pause(true);
+			// the shaders the game has built so far, kept for its next start (nothing to write if none are new)
+			gpu->SaveShaderCache();
 			if (menu::open())
 				continue;
 			audio::pause(false);

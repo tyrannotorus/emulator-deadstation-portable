@@ -17,6 +17,8 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <thread>
+#include <cstdio>
+#include <unistd.h>
 
 
 #include "Common/Log.h"
@@ -87,6 +89,7 @@ GPU_Vulkan::GPU_Vulkan(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 		shaderCachePath_ = GetSysDirectory(DIRECTORY_APP_CACHE) / (discID + ".vkshadercache");
 		pipelineManager_->SetDriverCachePath(GetSysDirectory(DIRECTORY_APP_CACHE) / (discID + ".vkdriver"));
 		LoadCache(shaderCachePath_);
+		savedCount_ = CacheCount();
 	}
 
 	InitDeviceObjects();
@@ -162,14 +165,43 @@ void GPU_Vulkan::SaveCache(const Path &filename) {
 		return;
 	}
 
-	FILE *f = File::OpenCFile(filename, "wb");
+	// Deadstation Portable: written beside it and put in its place once whole (a power cut mid-write keeps the last one)
+	const Path tmp = filename.WithExtraExtension(".tmp");
+	FILE *f = File::OpenCFile(tmp, "wb");
 	if (!f)
 		return;
+	const int count = CacheCount();
 	shaderManagerVulkan_->SaveCache(f, &drawEngine_);
 	// WARNING: See comment in LoadCache if you are tempted to flip the second parameter to true.
 	pipelineManager_->SavePipelineCache(f, false, shaderManagerVulkan_, draw_);
-	INFO_LOG(Log::G3D, "Saved Vulkan pipeline cache");
-	fclose(f);
+	bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+	ok = fclose(f) == 0 && ok;
+	if (ok && File::Rename(tmp, filename)) {
+		savedCount_ = count;
+		INFO_LOG(Log::G3D, "Saved Vulkan pipeline cache");
+	} else {
+		File::Delete(tmp, true);
+		WARN_LOG(Log::G3D, "Vulkan pipeline cache not saved");
+	}
+}
+
+int GPU_Vulkan::CacheCount() const {
+	return shaderManagerVulkan_->GetNumVertexShaders() + shaderManagerVulkan_->GetNumFragmentShaders() +
+		shaderManagerVulkan_->GetNumGeometryShaders() + pipelineManager_->GetNumPipelines();
+}
+
+void GPU_Vulkan::SaveShaderCache() {
+	if (!shaderCachePath_.Valid() || !draw_)
+		return;
+	const double start = time_now_d();
+	VulkanRenderManager *rm = (VulkanRenderManager *)draw_->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
+	rm->WaitForPipelines();
+	const int count = CacheCount(), before = savedCount_;
+	if (count == before)
+		return;
+	SaveCache(shaderCachePath_);
+	std::fprintf(stderr, "Deadstation Portable: shader cache: %s, %d shaders and pipelines (%d before), %.0f ms\n", savedCount_ == count ? "saved" : "NOT saved",
+		count, before, (time_now_d() - start) * 1000.0);
 }
 
 GPU_Vulkan::~GPU_Vulkan() {
@@ -180,7 +212,10 @@ GPU_Vulkan::~GPU_Vulkan() {
 		rm->CheckNothingPending();
 	}
 
-	SaveCache(shaderCachePath_);
+	// Deadstation Portable: saved when the menu opens (SaveShaderCache), so leaving through it has nothing more to write; this
+	// is for what's new since, when the game is ended from outside (SIGTERM: NextUI powering the Brick off)
+	if (shaderCachePath_.Valid() && CacheCount() != savedCount_)
+		SaveCache(shaderCachePath_);
 
 	// StopThreads should have ensured that no pipelines are queued to compile at this point. So we can tear it down.
 	delete pipelineManager_;

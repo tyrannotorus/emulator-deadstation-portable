@@ -66,6 +66,14 @@ private:
 
 	void LoadCache(const Path &filename);
 	void SaveCache(const Path &filename);
+	// what the cache holds: shaders and pipelines
+	int CacheCount() const;
+	int savedCount_ = -1;
+
+public:
+	void SaveShaderCache() override;
+
+private:
 
 	FramebufferManagerVulkan *framebufferManagerVulkan_;
 	TextureCacheVulkan *textureCacheVulkan_;
