@@ -203,7 +203,9 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 
 	// Add code to convert matrices to 4x4.
 	// Later we might want to do this when the matrices are loaded instead.
-	const int firstStoredBone = pair && dec.skinInDecode ? 2 : 4;
+	// weights and a position only: that pair keeps bones 0-3 in Q16-Q31 as the old loop does (Jit_PairSkinnedPosOnly)
+	const bool posOnly = pair && dec.skinInDecode && dec.numSteps_ == 2;
+	const int firstStoredBone = pair && dec.skinInDecode && !posOnly ? 2 : 4;
 	if (dec.skinInDecode) {
 		// Copying from R3 to R4
 		MOVP2R(X3, gstate.boneMatrix);
@@ -265,12 +267,14 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 			fp.INS(32, dec.skinInDecode ? Q2 : Q16, 0, Q0, 1);
 			fp.INS(32, dec.skinInDecode ? Q3 : Q17, 0, Q1, 1);
 		}
-		if (dec.skinInDecode && dec.nweights > 2)
-			MOVP2R(X8, &bones[16 * 2]);
+		if (dec.skinInDecode && dec.nweights > firstStoredBone)
+			MOVP2R(X8, &bones[16 * firstStoredBone]);
 		SUBS(counterReg, counterReg, 2);
 		FixupBranch noPairs = B(CC_LT);
 		const u8 *pairStart = NopAlignCode16();
-		if (dec.skinInDecode)
+		if (posOnly)
+			Jit_PairSkinnedPosOnly(dec);
+		else if (dec.skinInDecode)
 			Jit_PairSkinned(dec);
 		else
 			Jit_Pair(dec);
@@ -281,8 +285,8 @@ JittedVertexDecoder VertexDecoderJitCache::Compile(const VertexDecoder &dec, int
 		SetJumpTarget(noPairs);
 		ADDI2R(counterReg, counterReg, 2, scratchReg);
 		pairsDone = CBZ(counterReg);
-		// the one-vertex loop keeps bones 2 and 3 in Q24-Q31, which the pair loop used
-		if (dec.skinInDecode && dec.nweights > 2) {
+		// the one-vertex loop keeps bones 2 and 3 in Q24-Q31, which the pair loop used (not the position-only one)
+		if (dec.skinInDecode && !posOnly && dec.nweights > 2) {
 			MOVP2R(X4, &bones[16 * 2]);
 			fp.LD1(32, 4, INDEX_POST, Q24, X4);
 			if (dec.nweights > 3)
@@ -923,11 +927,6 @@ bool VertexDecoderJitCache::PairSupported(const VertexDecoder &dec) const {
 			return false;
 		if (!IsStep(dec, 0, &V::Step_WeightsU8Skin) && !IsStep(dec, 0, &V::Step_WeightsU16Skin) && !IsStep(dec, 0, &V::Step_WeightsFloatSkin))
 			return false;
-		// float weights (4 or more) and a position, nothing else: no conversions for the pair to overlap, and bones 2 and 3 read
-		// from memory instead of kept in registers: measured slower or no better in 7-vertex calls (P f W f x4: 60.0 -> 66.1
-		// cycles a vertex, x5 80.7 -> 81.2; x3 53.9 -> 52.5 and faster from L1, so x3 pairs)
-		if (IsStep(dec, 0, &V::Step_WeightsFloatSkin) && dec.nweights >= 4 && dec.numSteps_ == 2)
-			return false;
 		static const StepFunction okSkin[] = {
 			&V::Step_TcU8Prescale, &V::Step_TcU16Prescale, &V::Step_TcFloatPrescale, &V::Step_TcU8ToFloat, &V::Step_TcU16ToFloat,
 			&V::Step_TcFloat,
@@ -1443,4 +1442,156 @@ void VertexDecoderJitCache::Jit_PairSkinned(const VertexDecoder &dec) {
 		op();
 	for (const PairOp &op : st[1])
 		op();
+}
+
+// Skinned, weights and a position only (no normal, texture coordinates or color): few registers a vertex, so bones 0-3 stay in
+// Q16-Q31 where the prologue put them (the old loop's layout: nothing to reload for the tail), and bones 4 up are read a column at
+// a time from the array (from bone 4, as the old loop stores them) into two registers taken in turn, each column used by both
+// vertices. Phases as Jit_PairSkinned: weights and positions loaded and converted; both matrices bone by bone; the two
+// transforms; A's store, B's. The old operations in the old order for each vertex.
+// Registers: A: Q4-Q7 matrix, Q8/Q9 weights, Q10 position; B: Q11-Q14, Q15/Q0, Q1; Q2/Q3 bone 4+ columns, then the accumulators.
+// GPRs (one or two u8/u16 weights): A W6/W7, B W14/W15. X8 points at bone 4 when there are more than four.
+void VertexDecoderJitCache::Jit_PairSkinnedPosOnly(const VertexDecoder &dec) {
+	typedef VertexDecoder V;
+	const int n = dec.nweights;
+	const bool wU8 = IsStep(dec, 0, &V::Step_WeightsU8Skin), wU16 = IsStep(dec, 0, &V::Step_WeightsU16Skin);
+	const bool scalarWeights = (wU8 || wU16) && n <= 2;
+	int posKind = 32;
+	if (IsStep(dec, 1, &V::Step_PosS8Skin)) posKind = 8;
+	else if (IsStep(dec, 1, &V::Step_PosS16Skin)) posKind = 16;
+
+	struct Lane {
+		int s, d;
+		ARM64Reg M[4];
+		ARM64Reg w0, w1, pos, acc;
+		ARM64Reg g0, g1;
+	};
+	const Lane L[2] = {
+		{ 0, 0, { Q4, Q5, Q6, Q7 }, Q8, Q9, Q10, Q2, W6, W7 },
+		{ dec.VertexSize(), dec.decFmt.stride, { Q11, Q12, Q13, Q14 }, Q15, Q0, Q1, Q3, W14, W15 },
+	};
+	auto weight = [&](const Lane &R, int k, ARM64Reg *reg, u8 *idx) {
+		if (scalarWeights) {
+			*reg = k == 0 ? R.w0 : R.w1;
+			*idx = 0;
+		} else {
+			*reg = k < 4 ? R.w0 : R.w1;
+			*idx = (u8)(k & 3);
+		}
+	};
+
+	std::vector<PairOp> p1[2], p2, p3;
+	for (int k = 0; k < 2; k++) {
+		const Lane R = L[k];
+		std::vector<PairOp> &l = p1[k];
+		// the weights, as Jit_PairSkinned loads them
+		if (wU8 || wU16) {
+			if (scalarWeights) {
+				const int fbits = wU8 ? 7 : 15;
+				for (int j = 0; j < n; j++) {
+					const ARM64Reg g = j == 0 ? R.g0 : R.g1, v = EncodeRegToSingle(j == 0 ? R.w0 : R.w1);
+					const int off = R.s + (wU8 ? j : j * 2);
+					l.push_back([=] { if (wU8) LDURB(g, srcReg, off); else LDURH(g, srcReg, off); });
+					l.push_back([=] { fp.UCVTF(v, g, fbits); });
+				}
+			} else {
+				for (int part = 0; part < (n > 4 ? 2 : 1); part++) {
+					const int cnt = part == 0 ? std::min(n, 4) : n - 4;
+					const ARM64Reg q = part == 0 ? R.w0 : R.w1, d = EncodeRegToDouble(q);
+					if (wU8) {
+						const int bits = cnt == 1 ? 8 : cnt == 2 ? 16 : 32;
+						const int off = R.s + part * 4;
+						l.push_back([=] { fp.LDUR(bits, d, srcReg, off); });
+						l.push_back([=] { fp.UXTL(8, q, d); });
+						l.push_back([=] { fp.UXTL(16, q, d); });
+						l.push_back([=] { fp.UCVTF(32, q, q, 7); });
+					} else {
+						const int bits = cnt == 1 ? 16 : cnt == 2 ? 32 : 64;
+						const int off = R.s + part * 8;
+						l.push_back([=] { fp.LDUR(bits, d, srcReg, off); });
+						l.push_back([=] { fp.UXTL(16, q, d); });
+						l.push_back([=] { fp.UCVTF(32, q, q, 15); });
+					}
+				}
+			}
+		} else {
+			const int bits0 = n == 1 ? 32 : n == 2 ? 64 : 128;
+			const ARM64Reg q0 = R.w0, q1 = R.w1;
+			l.push_back([=] { fp.LDUR(bits0, bits0 == 32 ? EncodeRegToSingle(q0) : bits0 == 64 ? EncodeRegToDouble(q0) : q0, srcReg, R.s); });
+			if (n > 4) {
+				const int bits1 = n == 5 ? 32 : n == 6 ? 64 : 128;
+				l.push_back([=] { fp.LDUR(bits1, bits1 == 32 ? EncodeRegToSingle(q1) : bits1 == 64 ? EncodeRegToDouble(q1) : q1, srcReg, R.s + 16); });
+			}
+		}
+		// the position, loaded and converted (as the old steps)
+		const int off = R.s + dec.posoff;
+		const ARM64Reg q = R.pos, d = EncodeRegToDouble(R.pos), s1 = EncodeRegToSingle(R.pos);
+		if (posKind == 8) {
+			l.push_back([=] { fp.LDUR(32, s1, srcReg, off); });
+			l.push_back([=] { fp.SXTL(8, d, s1); });
+			l.push_back([=] { fp.SXTL(16, q, d); });
+			l.push_back([=] { fp.SCVTF(32, q, q, 7); });
+		} else if (posKind == 16) {
+			l.push_back([=] { fp.LDUR(64, d, srcReg, off); });
+			l.push_back([=] { fp.SXTL(16, q, d); });
+			l.push_back([=] { fp.SCVTF(32, q, q, 15); });
+		} else {
+			l.push_back([=] { fp.LDUR(128, q, srcReg, off); });
+		}
+	}
+	// both matrices, bone by bone: bones 0-3 from Q16-Q31; 4 up a column at a time into Q2 / Q3 in turn
+	static const ARM64Reg kBoneRegs[4][4] = { { Q16, Q17, Q18, Q19 }, { Q20, Q21, Q22, Q23 }, { Q24, Q25, Q26, Q27 }, { Q28, Q29, Q30, Q31 } };
+	int column = 0;
+	for (int b = 0; b < n; b++) {
+		for (int c = 0; c < 4; c++) {
+			ARM64Reg br;
+			if (b < 4) {
+				br = kBoneRegs[b][c];
+			} else {
+				br = (column++ & 1) ? Q3 : Q2;
+				const int off = (b - 4) * 64 + c * 16;
+				p2.push_back([=] { fp.LDR(128, INDEX_UNSIGNED, br, X8, off); });
+			}
+			for (int k = 0; k < 2; k++) {
+				ARM64Reg wr; u8 wi;
+				weight(L[k], b, &wr, &wi);
+				const ARM64Reg m = L[k].M[c];
+				if (b == 0)
+					p2.push_back([=] { fp.FMUL(32, m, br, wr, wi); });
+				else
+					p2.push_back([=] { fp.FMLA(32, m, br, wr, wi); });
+			}
+		}
+	}
+	// the two transforms (the old order for each accumulator), alternating
+	for (int j = 0; j < 3; j++) {
+		for (int k = 0; k < 2; k++) {
+			const ARM64Reg mj = L[k].M[j], pos = L[k].pos, a = L[k].acc;
+			const u8 jj = (u8)j;
+			p3.push_back([=] { if (jj == 0) fp.FMUL(32, a, mj, pos, 0); else fp.FMLA(32, a, mj, pos, jj); });
+		}
+	}
+	for (int k = 0; k < 2; k++) {
+		const ARM64Reg a = L[k].acc, m3 = L[k].M[3];
+		p3.push_back([=] { fp.FADD(32, a, a, m3); });
+	}
+
+	size_t at[2]{};
+	for (bool any = true; any;) {
+		any = false;
+		for (int l = 0; l < 2; l++) {
+			if (at[l] < p1[l].size()) {
+				p1[l][at[l]++]();
+				any = true;
+			}
+		}
+	}
+	for (const PairOp &op : p2)
+		op();
+	for (const PairOp &op : p3)
+		op();
+	for (int k = 0; k < 2; k++) {
+		const Lane &R = L[k];
+		fp.STUR(128, R.acc, dstReg, R.d + dec.decFmt.posoff);
+	}
 }

@@ -619,6 +619,7 @@ private:
 	bool PairSupported(const VertexDecoder &dec) const;
 	void Jit_Pair(const VertexDecoder &dec);
 	void Jit_PairSkinned(const VertexDecoder &dec);
+	void Jit_PairSkinnedPosOnly(const VertexDecoder &dec);
 	bool skinPreload_ = false;
 	bool skinNormalPending_ = false;
 	int skinNormalOff_ = 0;
