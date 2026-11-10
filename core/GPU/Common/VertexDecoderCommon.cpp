@@ -1182,6 +1182,13 @@ static const StepFunction posstep_through[4] = {
 	&VertexDecoder::Step_PosFloatThrough,
 };
 
+// (profiling) a hand-written decoder chosen over the JIT: its format, so a run shows which games use which (local/brick, PROF=1)
+static void LogHandDecoder(const VertexDecoder *dec) {
+	static const bool prof = getenv("DEADSTATION_PORTABLE_PROF") != nullptr;
+	if (prof)
+		printf("vdechand %08x %s\n", dec->VertexType(), dec->GetString(SHADER_STRING_SHORT_DESC).c_str());
+}
+
 void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, VertexDecoderJitCache *jitCache) {
 	fmt_ = fmt;
 	throughmode = (fmt & GE_VTYPE_THROUGH) != 0;
@@ -1395,6 +1402,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		steps_[1] == &VertexDecoder::Step_NormalS8 && steps_[2] == &VertexDecoder::Step_PosFloat && morphcount == 1 && VertexSize() == 20 &&
 		tcoff == 0 && nrmoff == 4 && posoff == 8 && decFmt.stride == 24 && decFmt.uvoff == 0 && decFmt.nrmoff == 8 && decFmt.posoff == 12) {
 		jitted_ = steps_[0] == &VertexDecoder::Step_TcU16Prescale ? &VdecHand_Tu16pre_Ns8_Pf : &VdecHand_Tu16_Ns8_Pf;
+		LogHandDecoder(this);
 		return;
 	}
 	// W: float, one or two, skinned  T: u8 prescaled  C: 4444  N: s8  P: float: God of War's two most used skinned formats.
@@ -1405,6 +1413,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		nrmoff == 4 * nweights + 4 && posoff == 4 * nweights + 8 &&
 		decFmt.stride == 36 && decFmt.uvoff == 0 && decFmt.c0off == 8 && decFmt.nrmoff == 12 && decFmt.posoff == 24) {
 		jitted_ = nweights == 1 ? &VtxDec_Wf1_Tu8_C4444_Ns8_Pf : &VtxDec_Wf2_Tu8_C4444_Ns8_Pf;
+		LogHandDecoder(this);
 		return;
 	}
 	// W: u8, one to three, skinned  T: u8 prescaled  N: s8  P: s16: Tekken 6's three most used skinned formats.
@@ -1414,6 +1423,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		nrmoff == nweights + 2 && posoff == (nweights == 1 ? 6 : 8) && VertexSize() == (nweights == 1 ? 12 : 14) &&
 		decFmt.stride == 32 && decFmt.uvoff == 0 && decFmt.nrmoff == 8 && decFmt.posoff == 20) {
 		jitted_ = nweights == 1 ? &VtxDec_Wu8x1_Tu8_Ns8_Ps16 : nweights == 2 ? &VtxDec_Wu8x2_Tu8_Ns8_Ps16 : &VtxDec_Wu8x3_Tu8_Ns8_Ps16;
+		LogHandDecoder(this);
 		return;
 	}
 	// T: u8 prescaled  C: 565  P: s16: Tekken 6's most used unskinned format.
@@ -1421,6 +1431,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		steps_[2] == &VertexDecoder::Step_PosS16 && morphcount == 1 && VertexSize() == 10 && tcoff == 0 && coloff == 2 && posoff == 4 &&
 		decFmt.stride == 24 && decFmt.uvoff == 0 && decFmt.c0off == 8 && decFmt.posoff == 12) {
 		jitted_ = &VdecHand_Tu8pre_C565_Ps16;
+		LogHandDecoder(this);
 		return;
 	}
 
@@ -1430,9 +1441,11 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 	if (fmtWithoutSkinFlag == (GE_VTYPE_TC_8BIT | GE_VTYPE_COL_5551 | GE_VTYPE_POS_16BIT)) {
 		// Can skip looking up in the JIT.
 		jitted_ = &VtxDec_Tu8_C5551_Ps16;
+		LogHandDecoder(this);
 		return;
 	} else if (!options.expand8BitNormalsToFloat && fmtWithoutSkinFlag == (GE_VTYPE_TC_16BIT | GE_VTYPE_NRM_8BIT | GE_VTYPE_COL_8888 | GE_VTYPE_POS_FLOAT)) {
 		jitted_ = &VtxDec_Tu16_C8888_Pfloat;
+		LogHandDecoder(this);
 		return;
 	}
 
