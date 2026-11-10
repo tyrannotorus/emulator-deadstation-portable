@@ -38,10 +38,16 @@ void runLists(u64 ticks);
 void runListsHere(u64 ticks);
 // a list's stall moved, the lists then run from it at ticks (the CPU's time, as each run's interrupts are timed from it)
 void updateStall(int listid, u32 stall, u64 ticks);
-// what the GE has for the game, delivered without waiting for the rest
+// what the GE has for the game and has been released to it (sync, endFrame), delivered without waiting for the rest
 void deliver();
+// has anything been posted whose events the game hasn't been given yet
+bool unreleased();
 void display(u32 framebuf, u32 stride, GEBufferFormat format);
 void pspFrame();
+// The game flipped to a new picture: the GPU's count of them (gpuStats.numFlips) goes up in order with what's posted, so a list
+// sees the count it had when it was posted, whatever the GE thread's lag (texture rehashing, framebuffer ageing and effect
+// skipping go by it).
+void flipped();
 void skipFrame(bool skip);
 void invalidate(u32 addr, int size, GPUInvalidationType type);
 // a guest frame has ended: at most one more may be ahead of the GE
@@ -77,9 +83,10 @@ void postInterrupt(int listid, u32 pc, u64 atTicks);
 void postSync(GPUSyncType type, int id, u64 atTicks);
 // CPU thread
 extern std::atomic<bool> eventsWaiting;
-// GE interrupts when the GE's thread gets to them: lists the game has handlers for run there too, the CPU going on, and what they
-// raise reaches the game at its next check (CoreTiming::Advance), late by however far the CPU ran on, or on time when the game
-// went idle waiting for it (idleSync). Off: the CPU waits for such lists (runListsHere) and the stall updates that end them.
+// GE interrupts when the GE's thread has got to them: lists the game has handlers for run there too, the CPU going on, and what
+// they raise reaches the game at the next point of its clock that waits for the GE (a sync, the next frame's end, idle with such
+// a list open: idleSync), late by a set amount of the game's time. Off: the CPU waits for such lists (runListsHere) and the stall
+// updates that end them.
 extern bool lateEvents;
 // how it's chosen: -1 by measurement (sceDisplay.cpp, GeModeMeasure), 0 never, 1 always (tests: DEADSTATION_PORTABLE_GELATE)
 extern int lateMode;

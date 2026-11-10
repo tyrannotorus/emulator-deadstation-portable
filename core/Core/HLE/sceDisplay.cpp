@@ -643,6 +643,12 @@ void hleEnterVblank(u64 userdata, int cyclesLate) {
 }
 
 static bool flipForced = false;
+// the flips so far as the game's CPU has made them (gpuStats.numFlips is the GPU's, ge::flipped)
+static int cpuFlips = 0;
+
+int __DisplayFlips() {
+	return cpuFlips;
+}
 
 bool __DisplayTakeFlipForced() {
 	const bool forced = flipForced;
@@ -679,7 +685,8 @@ void __DisplayFlip(int cyclesLate) {
 	flipForced = noRecentFlip;
 
 	if (fbDirty) {
-		gpuStats.numFlips++;
+		cpuFlips++;
+		ge::flipped();
 	}
 
 	bool skipFrame;

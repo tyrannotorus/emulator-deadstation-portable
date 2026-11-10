@@ -27,11 +27,12 @@ namespace
 
 struct Command
 {
-	enum Kind { Lists, Display, PspFrame, SkipFrame, Invalidate, FrameEnd, Close, Call, Stall } kind;
+	enum Kind { Lists, Display, PspFrame, Flip, SkipFrame, Invalidate, FrameEnd, Close, Call, Stall } kind;
 	u32 a = 0, b = 0;
 	int c = 0;
 	u64 ticks = 0;
 	const std::function<void()> *what = nullptr;
+	u64 seq = 0;
 };
 
 struct Event
@@ -41,6 +42,7 @@ struct Event
 	u32 pc;
 	u64 ticks;
 	GPUSyncType type;
+	u64 seq;	// the command that raised it
 };
 
 std::thread thread;
@@ -59,6 +61,23 @@ int framesAhead = 0;
 
 std::mutex eventsMutex;
 std::vector<Event> events;
+
+// What the GE raises reaches the game only at fixed points of the game's own clock, never whenever the host's GE thread gets there:
+// each command is numbered as it's posted, and the CPU thread hands over the events of commands up to one it has waited for. The
+// points: the sceGe calls that wait for the GE (and enqueues, and lists run here), idle with a handler's list open (late events),
+// and each frame's end, for everything up to the frame before (endFrame's wait).
+u64 postedSeq = 0;		// CPU thread, under mutex
+u64 runningSeq = 0;		// GE's thread
+u64 releasedSeq = 0;	// CPU thread
+u64 lastFrameEndSeq = 0, prevFrameEndSeq = 0;	// CPU thread
+
+// CPU thread: the game is given what the GE raised up to command upTo, which has run
+void release(u64 upTo)
+{
+	if (upTo > releasedSeq)
+		releasedSeq = upTo;
+	deliverEvents();
+}
 
 std::atomic<bool> worked { true };
 // GE's thread: running a stall update the CPU didn't wait for (sceGeListUpdateStallAddr found nothing in it the game could see)
@@ -122,6 +141,9 @@ void run(const Command& c)
 	case Command::PspFrame:
 		gpu->PSPFrame();
 		break;
+	case Command::Flip:
+		gpuStats.numFlips++;
+		break;
 	case Command::SkipFrame:
 		if (c.a != 0)
 			gstate_c.skipDrawReason |= SKIPDRAW_SKIPFRAME;
@@ -175,6 +197,7 @@ void loop()
 		const Command command = queue.front();
 		queue.pop_front();
 		working = true;
+		runningSeq = command.seq;
 		runningFrameEnd = command.kind == Command::FrameEnd;
 		if (runningFrameEnd)
 			done.notify_all();
@@ -193,10 +216,11 @@ void loop()
 	}
 }
 
-void post(const Command& command)
+void post(Command command)
 {
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		command.seq = ++postedSeq;
 		queue.push_back(command);
 		if (command.kind == Command::FrameEnd)
 			framesAhead++;
@@ -275,8 +299,7 @@ void runListsHere(u64 ticks)
 			{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
 	}
 	// what the GE raised before these lists reaches the game ahead of what they raise
-	if (eventsWaiting.load(std::memory_order_relaxed))
-		deliverEvents();
+	release(postedSeq);
 	// the GE's thread is idle, and only this thread posts to it: the host frame and the GPU are this thread's until it does
 	const u64 from = nowNs();
 	openFrame();
@@ -305,6 +328,11 @@ void deliver()
 		deliverEvents();
 }
 
+bool unreleased()
+{
+	return running && postedSeq > releasedSeq;
+}
+
 void display(u32 framebuf, u32 stride, GEBufferFormat format)
 {
 	worked = true;
@@ -328,6 +356,16 @@ void pspFrame()
 		return;
 	}
 	post(Command { Command::PspFrame });
+}
+
+void flipped()
+{
+	if (!running)
+	{
+		gpuStats.numFlips++;
+		return;
+	}
+	post(Command { Command::Flip });
 }
 
 void skipFrame(bool skip)
@@ -362,6 +400,8 @@ void endFrame(bool force)
 	Command c { Command::FrameEnd };
 	c.a = force ? 1 : 0;
 	post(c);
+	prevFrameEndSeq = lastFrameEndSeq;
+	lastFrameEndSeq = postedSeq;
 	const u64 from = nowNs();
 	bool waited = false;
 	{
@@ -372,8 +412,8 @@ void endFrame(bool force)
 	}
 	if (waited)
 		{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
-	if (eventsWaiting.load(std::memory_order_relaxed))
-		deliverEvents();
+	// at most this frame's end is still ahead: everything up to the last one has run
+	release(prevFrameEndSeq);
 }
 
 bool takeWorked()
@@ -397,8 +437,7 @@ void sync()
 		if (waited)
 			{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
 	}
-	if (eventsWaiting.load(std::memory_order_relaxed))
-		deliverEvents();
+	release(postedSeq);
 }
 
 void syncLists()
@@ -417,8 +456,7 @@ void syncLists()
 		if (waited)
 			{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
 	}
-	if (eventsWaiting.load(std::memory_order_relaxed))
-		deliverEvents();
+	release(postedSeq);
 }
 
 bool idleSync()
@@ -432,10 +470,9 @@ bool idleSync()
 		done.wait(lock, [] { return queue.empty() && (!working || runningFrameEnd); });
 	}
 	{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
-	if (!eventsWaiting.load(std::memory_order_relaxed))
-		return false;
-	deliverEvents();
-	return true;
+	const bool any = eventsWaiting.load(std::memory_order_relaxed);
+	release(postedSeq);
+	return any;
 }
 
 void pause()
@@ -476,7 +513,7 @@ void postInterrupt(int listid, u32 pc, u64 atTicks)
 	if (quietRun)
 		quietRunRaised("INTERRUPT", listid);
 	std::lock_guard<std::mutex> lock(eventsMutex);
-	events.push_back({ true, listid, pc, atTicks, GPU_SYNC_DRAW });
+	events.push_back({ true, listid, pc, atTicks, GPU_SYNC_DRAW, runningSeq });
 	eventsWaiting = true;
 }
 
@@ -490,7 +527,7 @@ void postSync(GPUSyncType type, int id, u64 atTicks)
 	if (quietRun)
 		quietRunRaised("SYNC", id);
 	std::lock_guard<std::mutex> lock(eventsMutex);
-	events.push_back({ false, id, 0, atTicks, type });
+	events.push_back({ false, id, 0, atTicks, type, runningSeq });
 	eventsWaiting = true;
 }
 
@@ -499,8 +536,18 @@ void deliverEvents()
 	std::vector<Event> now;
 	{
 		std::lock_guard<std::mutex> lock(eventsMutex);
-		now.swap(events);
-		eventsWaiting = false;
+		// in the order raised, so the commands' numbers only grow
+		size_t upTo = 0;
+		while (upTo < events.size() && events[upTo].seq <= releasedSeq)
+			upTo++;
+		if (upTo == events.size())
+			now.swap(events);
+		else
+		{
+			now.assign(events.begin(), events.begin() + upTo);
+			events.erase(events.begin(), events.begin() + upTo);
+		}
+		eventsWaiting = !events.empty();
 	}
 	for (const Event& e : now)
 	{

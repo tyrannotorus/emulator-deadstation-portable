@@ -61,7 +61,8 @@ static int geSyncEvent;
 static int geInterruptEvent;
 static int geCycleEvent;
 
-void __GeRunLists();
+bool __GeRunLists();
+static void __GeListClosed(int listid);
 
 class GeIntrHandler : public IntrHandler {
 public:
@@ -119,6 +120,7 @@ public:
 		// In other words, not before another interrupt finishes.
 		if (dl->signal != PSP_GE_SIGNAL_HANDLER_PAUSE && cmd == GE_CMD_FINISH) {
 			dl->state = PSP_GE_DL_STATE_COMPLETED;
+			__GeListClosed(intrdata.listid);
 		}
 
 		SubIntrHandler* handler = get(subintr);
@@ -207,26 +209,47 @@ static bool __GeHasHandler(int subIntrBase) {
 	return subIntrBase >= 0 && geIntrHandler != nullptr && (geIntrHandler->get(subIntrBase | PSP_GE_SUBINTR_FINISH) != nullptr || geIntrHandler->get(subIntrBase | PSP_GE_SUBINTR_SIGNAL) != nullptr);
 }
 
-// The lists queued go on running on the GE's thread, with the CPU going on, unless the game could be waiting for what they end with.
-void __GeRunLists() {
-	if (ge::busy() && !gpu->ListsQueued())
+// Lists with such a handler, enqueued and not yet finished as the game has seen it (its FINISH interrupt, a dequeue, a break):
+// the CPU thread's own count, where the GE's queue (GPUCommon::QueuedListsHave) is the GE's thread's, and changes as it runs.
+static u64 handlerListsOpen = 0;
+
+static void __GeListOpened(int listid, int subIntrBase) {
+	if (listid >= 0 && listid < 64 && __GeHasHandler(subIntrBase))
+		handlerListsOpen |= 1ULL << listid;
+}
+
+static void __GeListClosed(int listid) {
+	if (listid >= 0 && listid < 64)
+		handlerListsOpen &= ~(1ULL << listid);
+}
+
+// from the lists themselves, the GE idle (a state loaded)
+static void __GeListsOpenAgain() {
+	handlerListsOpen = 0;
+	if (!gpu)
 		return;
-	if (!ge::lateEvents && gpu->QueuedListsHave(__GeHasHandler))
+	for (int i = 0; i < 64; i++) {
+		const DisplayList *dl = gpu->getList(i);
+		if (dl && dl->state != PSP_GE_DL_STATE_NONE && dl->state != PSP_GE_DL_STATE_COMPLETED)
+			__GeListOpened(i, dl->subIntrBase);
+	}
+}
+
+// The lists queued go on running on the GE's thread, with the CPU going on, unless the game could be waiting for what they end
+// with. True if they ran here. Decided from the CPU thread's own state only, never the GE thread's progress.
+bool __GeRunLists() {
+	if (!ge::lateEvents && handlerListsOpen != 0) {
 		ge::runListsHere(CoreTiming::GetTicks());
-	else
-		ge::runLists(CoreTiming::GetTicks());
+		return true;
+	}
+	ge::runLists(CoreTiming::GetTicks());
+	return !ge::active();
 }
 
 // Deadstation Portable (ge::lateEvents): the CPU has nothing to run (CoreTiming::Idle). A list the game has a handler for may still
 // be on the GE's thread, and what it raises could be what the game waits for: idle time passes only once it's known.
 bool __GeIdleSync() {
-	if (!ge::lateEvents)
-		return false;
-	if (ge::eventsWaiting.load(std::memory_order_relaxed)) {
-		ge::deliverEvents();
-		return true;
-	}
-	if (!ge::busy() || !gpu->QueuedListsHave(__GeHasHandler))
+	if (!ge::lateEvents || handlerListsOpen == 0 || !ge::unreleased())
 		return false;
 	return ge::idleSync();
 }
@@ -252,6 +275,7 @@ static void __GeForgetStalls();
 
 void __GeInit() {
 	__GeForgetStalls();
+	handlerListsOpen = 0;
 	memset(&ge_used_callbacks, 0, sizeof(ge_used_callbacks));
 	memset(&ge_callback_data, 0, sizeof(ge_callback_data));
 	ge_pending_cb.clear();
@@ -305,7 +329,8 @@ void __GeDoState(PointerWrap &p) {
 	Do(p, listWaitingThreads);
 	Do(p, drawWaitingThreads);
 
-	// Everything else is done in sceDisplay.
+	// Everything else is done in sceDisplay (before this: the lists are loaded)
+	__GeListsOpenAgain();
 }
 
 void __GeShutdown() {
@@ -423,6 +448,7 @@ u32 sceGeListEnQueue(u32 listAddress, u32 stallAddress, int callbackId, u32 optP
 	u32 listID = gpu->EnqueueList(listAddress, stallAddress, __GeSubIntrBase(callbackId), optParam, false, &runList);
 	if ((int)listID >= 0) {
 		__GeKnowStall(listID, stallAddress);
+		__GeListOpened(listID, __GeSubIntrBase(callbackId));
 		listID = LIST_ID_MAGIC ^ listID;
 	}
 	if (runList) {
@@ -447,6 +473,7 @@ u32 sceGeListEnQueueHead(u32 listAddress, u32 stallAddress, int callbackId, u32 
 	u32 listID = gpu->EnqueueList(listAddress, stallAddress, __GeSubIntrBase(callbackId), optParam, true, &runList);
 	if ((int)listID >= 0) {
 		__GeKnowStall(listID, stallAddress);
+		__GeListOpened(listID, __GeSubIntrBase(callbackId));
 		listID = LIST_ID_MAGIC ^ listID;
 	}
 	if (runList) {
@@ -462,6 +489,8 @@ static int sceGeListDeQueue(u32 listID) {
 	__GeForgetStalls();
 	WARN_LOG(Log::sceGe, "sceGeListDeQueue(%08x)", listID);
 	int result = gpu->DequeueList(LIST_ID_MAGIC ^ listID);
+	if (result == 0)
+		__GeListClosed(LIST_ID_MAGIC ^ listID);
 	hleReSchedule("dlist dequeued");
 	return hleNoLog(result);
 }
@@ -574,12 +603,13 @@ static int sceGeListUpdateStallAddr(u32 displayListID, u32 stallAddress) {
 	int retval = gpu->UpdateStall(LIST_ID_MAGIC ^ displayListID, stallAddress, &runList);
 	if (retval == 0 && listid >= 0 && listid < GeListCount)
 		cpuStall[listid] = newStall;
+	bool ranHere = true;
 	if (runList) {
-		__GeRunLists();
+		ranHere = __GeRunLists();
 	}
-	// the GE idle at the new stall (a list with a handler waited for): its offset for the list is known again
+	// the GE idle at the new stall (a list with a handler run here): its offset for the list is known again
 	if (listid >= 0 && listid < GeListCount) {
-		stallWalk[listid].valid = retval == 0 && !ge::busy();
+		stallWalk[listid].valid = retval == 0 && ranHere;
 		if (stallWalk[listid].valid)
 			stallWalk[listid].offset = gpu->ListOffsetAddr(listid);
 	}
@@ -632,6 +662,7 @@ static int sceGeBreak(u32 mode, u32 unknownPtr) {
 	DEBUG_LOG(Log::sceGe, "sceGeBreak(mode=%d, unknown=%08x)", mode, unknownPtr);
 	ge::sync();
 	int result = gpu->Break(mode);
+	__GeListsOpenAgain();
 	if (result >= 0 && mode == 0) {
 		return hleNoLog(LIST_ID_MAGIC ^ result);
 	}

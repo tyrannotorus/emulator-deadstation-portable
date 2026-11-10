@@ -41,6 +41,8 @@ void ;
 
 // the flip since the last call had to reach the screen, new picture or not
 bool __DisplayTakeFlipForced();
+// the flips so far, counted on the CPU thread (the GPU's own count, gpuStats.numFlips, follows its lists: ge::flipped)
+int __DisplayFlips();
 
 // Deadstation Portable: the sound queued for the speaker now and where it starts playing from, in seconds (the frontend's audio,
 // as it queues more): Auto frame skip skips only while the queue is under that

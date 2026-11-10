@@ -30,6 +30,7 @@
 #include <functional>
 #include <thread>
 #include <mutex>
+#include <algorithm>
 #include <condition_variable>
 
 #include "Common/Thread/ThreadUtil.h"
@@ -153,16 +154,6 @@ static void sasMixFinish(u64 userdata, int cycleslate) {
 	u64 result = __KernelGetWaitValue(threadID, error);
 
 	if (error == 0 && verify == 1) {
-		// Not done yet: only this guest thread has to wait for it, so it's looked at again in a moment instead of everything standing still
-		// (a fifth of a millisecond a mix in God of War). When nothing else in the guest wants to run this comes round fast, so it's bounded.
-		static int notYet = 0;
-		if (sasThreadState == SasThreadState::QUEUED && notYet < 64) {
-			notYet++;
-			CoreTiming::ScheduleEvent(usToCycles(25), sasMixEvent, userdata);
-			return;
-		}
-		notYet = 0;
-
 		// Wait until it's actually complete before waking the thread.
 		__SasDrain();
 
@@ -262,8 +253,19 @@ static u32 sceSasGetEndFlag(u32 core) {
 	return hleLogVerbose(Log::sceSas, endFlag);
 }
 
-static int delaySasResult(int result) {
-	const int usec = sas->EstimateMixUs();
+// Deadstation Portable: with the mix on its own thread, the game's thread waits a fixed time longer than the PSP's estimate (up to
+// half the mix's period in all, at most 1.6 ms more), so the host's mixer has usually finished when it wakes. The wait never
+// depends on how far the host has got, so the game's threads run in the same order every run.
+static int sasSlackUs(int usec) {
+	if (sasThreadState == SasThreadState::DISABLED)
+		return 0;
+	const int periodUs = (int)((s64)sas->GetGrainSize() * 1000000 / 44100);
+	return std::max(0, std::min(1600, periodUs / 2 - usec));
+}
+
+// usec: EstimateMixUs taken before the mix is handed to the mixer's thread, which ends voices as it goes
+static int delaySasResult(int result, int usec) {
+	usec += sasSlackUs(usec);
 
 	// No event, fall back.
 	if (sasMixEvent == -1) {
@@ -285,9 +287,10 @@ static u32 _sceSasCore(u32 core, u32 outAddr) {
 		return hleLogError(Log::sceSas, SCE_KERNEL_ERROR_CAN_NOT_WAIT, "dispatch disabled");
 	}
 
+	const int usec = sas->EstimateMixUs();
 	__SasEnqueueMix(outAddr);
 
-	return hleLogVerbose(Log::sceSas, delaySasResult(0));
+	return hleLogVerbose(Log::sceSas, delaySasResult(0, usec));
 }
 
 // Another way of running the mixer, the inoutAddr should be both input and output
@@ -303,9 +306,10 @@ static u32 _sceSasCoreWithMix(u32 core, u32 inoutAddr, int leftVolume, int right
 		return hleLogError(Log::sceSas, SCE_KERNEL_ERROR_CAN_NOT_WAIT, "dispatch disabled");
 	}
 
+	const int usec = sas->EstimateMixUs();
 	__SasEnqueueMix(inoutAddr, inoutAddr, leftVolume, rightVolume);
 
-	return delaySasResult(hleLogVerbose(Log::sceSas, 0));
+	return delaySasResult(hleLogVerbose(Log::sceSas, 0), usec);
 }
 
 static u32 sceSasSetVoice(u32 core, int voiceNum, u32 vagAddr, int size, int loop) {

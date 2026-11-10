@@ -389,8 +389,6 @@ void ForceCheck()
 }
 
 void Advance() {
-	if (ge::eventsWaiting.load(std::memory_order_relaxed))
-		ge::deliverEvents();
 	int cyclesExecuted = slicelength - currentMIPS->downcount;
 	globalTimer += cyclesExecuted;
 	currentMIPS->downcount = slicelength;

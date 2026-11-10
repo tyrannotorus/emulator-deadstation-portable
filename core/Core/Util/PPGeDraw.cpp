@@ -40,6 +40,7 @@
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceKernelMemory.h"
 #include "Core/HLE/sceGe.h"
+#include "Core/HLE/sceDisplay.h"
 #include "Core/MemMapHelpers.h"
 #include "Core/System.h"
 
@@ -1098,7 +1099,7 @@ bool PPGeImage::Load() {
 	Memory::Memset(texture_ + dataSize, 0, texSize - dataSize, "PPGeTexClear");
 	free(textureData);
 
-	lastFrame_ = gpuStats.numFlips;
+	lastFrame_ = __DisplayFlips();
 	loadedTextures_.push_back(this);
 	return true;
 }
@@ -1156,7 +1157,7 @@ void PPGeImage::CompatLoad(u32 texture, int width, int height) {
 }
 
 void PPGeImage::Decimate(int age) {
-	int tooOldFrame = gpuStats.numFlips - age;
+	int tooOldFrame = __DisplayFlips() - age;
 	for (size_t i = 0; i < loadedTextures_.size(); ++i) {
 		if (loadedTextures_[i]->lastFrame_ < tooOldFrame) {
 			loadedTextures_[i]->Free();
@@ -1173,7 +1174,7 @@ void PPGeImage::SetTexture() {
 	}
 
 	if (texture_ != 0) {
-		lastFrame_ = gpuStats.numFlips;
+		lastFrame_ = __DisplayFlips();
 		PPGeSetTexture(texture_, width_, height_);
 	} else {
 		PPGeDisableTexture();
