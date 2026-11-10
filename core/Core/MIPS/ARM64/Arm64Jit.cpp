@@ -1,8 +1,3 @@
-#include <cstring>
-#include <cstdlib>
-#include <vector>
-#include <algorithm>
-#include <map>
 // Copyright (c) 2012- PPSSPP Project.
 
 // This program is free software: you can redistribute it and/or modify
@@ -90,14 +85,10 @@ void Arm64Jit::DoState(PointerWrap &p) {
 	Do(p, defaultMode);
 	if (p.mode == PointerWrap::MODE_READ) {
 		// a state's "unknown-prefix mode" (saved after one block ended with a prefix to apply) isn't kept: the blocks it's handed
-		// to are found again as they're compiled. (tests) DEADSTATION_PORTABLE_JITPREFIX=state keeps it, as PPSSPP does.
-		const char *mode = getenv("DEADSTATION_PORTABLE_JITPREFIX");
-		const bool keep = mode != nullptr && strcmp(mode, "state") == 0;
-		if (!defaultMode)
-			WARN_LOG(Log::CPU, "Jit: the state was saved in unknown-prefix mode: %s", keep ? "kept (DEADSTATION_PORTABLE_JITPREFIX=state)" : "not kept, only blocks handed a prefix are compiled for one");
-		defaultPrefixMode_ = keep ? defaultMode : true;
+		// to are found again as they're compiled
+		defaultPrefixMode_ = true;
 		prefixEntries_.clear();
-		js.startDefaultPrefix = defaultPrefixMode_;
+		js.startDefaultPrefix = true;
 	}
 	if (s >= 2) {
 		Do(p, js.hasSetRounding);
@@ -567,39 +558,9 @@ void Arm64Jit::Comp_ReplacementFunc(MIPSOpcode op)
 	}
 }
 
-// (tests: DEADSTATION_PORTABLE_JITFALLBACKS=1) how often each VFPU op runs in the interpreter, by its name and the prefixes the
-// JIT knew of: counted by the translated code, told at quit (JitFallbackReport)
-struct JitFallbackKey {
-	const char *name;
-	int prefixes;	// 0 none, 1 known, 2 unknown
-	bool operator<(const JitFallbackKey &o) const { return name != o.name ? name < o.name : prefixes < o.prefixes; }
-};
-static std::map<JitFallbackKey, u64> jitFallbacks;
-static int jitFallbackCounting = -1;
-
-void JitFallbackReport() {
-	std::vector<std::pair<u64, JitFallbackKey>> all;
-	for (const auto &[key, count] : jitFallbacks)
-		all.push_back({ count, key });
-	std::sort(all.begin(), all.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-	static const char *const kinds[] = { "no prefix", "prefix known", "prefix unknown" };
-	for (size_t i = 0; i < all.size() && i < 25; i++)
-		fprintf(stderr, "Deadstation Portable: jit fallback: %s (%s) %llu times\n", all[i].second.name, kinds[all[i].second.prefixes], (unsigned long long)all[i].first);
-}
-
 void Arm64Jit::Comp_Generic(MIPSOpcode op) {
 	FlushAll();
 	MIPSInterpretFunc func = MIPSGetInterpretFunc(op);
-	if (jitFallbackCounting < 0)
-		jitFallbackCounting = getenv("DEADSTATION_PORTABLE_JITFALLBACKS") != nullptr ? 1 : 0;
-	if (func && jitFallbackCounting == 1 && (MIPSGetInfo(op) & IS_VFPU) != 0) {
-		const JitFallbackKey key { MIPSGetName(op), js.HasUnknownPrefix() ? 2 : (js.HasNoPrefix() ? 0 : 1) };
-		u64 *counter = &jitFallbacks[key];
-		MOVP2R(SCRATCH1_64, counter);
-		LDR(INDEX_UNSIGNED, SCRATCH2_64, SCRATCH1_64, 0);
-		ADD(SCRATCH2_64, SCRATCH2_64, 1);
-		STR(INDEX_UNSIGNED, SCRATCH2_64, SCRATCH1_64, 0);
-	}
 	if (func) {
 		SaveStaticRegisters();
 		// TODO: Perhaps keep the rounding mode for interp? Should probably, right?

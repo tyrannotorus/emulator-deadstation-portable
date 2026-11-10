@@ -1389,18 +1389,16 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 
 	_assert_msg_(decFmt.uvfmt == DEC_FLOAT_2 || decFmt.uvfmt == DEC_NONE, "Reader only supports float UV");
 
-	// (tests) DEADSTATION_PORTABLE_NOHAND=1: no hand-written decoder, the JIT for every format (to measure one against the other)
-	static const bool noHand = getenv("DEADSTATION_PORTABLE_NOHAND") != nullptr;
 	// Deadstation Portable: hand-written ARM64 decoders (VertexDecoderHandArm64.cpp), for a format whose steps, sizes and offsets
 	// are exactly theirs. T: u16 N: s8 P: float, prescaled or not.
-	if (!noHand && numSteps_ == 3 && (steps_[0] == &VertexDecoder::Step_TcU16Prescale || steps_[0] == &VertexDecoder::Step_TcU16ToFloat) &&
+	if (numSteps_ == 3 && (steps_[0] == &VertexDecoder::Step_TcU16Prescale || steps_[0] == &VertexDecoder::Step_TcU16ToFloat) &&
 		steps_[1] == &VertexDecoder::Step_NormalS8 && steps_[2] == &VertexDecoder::Step_PosFloat && morphcount == 1 && VertexSize() == 20 &&
 		tcoff == 0 && nrmoff == 4 && posoff == 8 && decFmt.stride == 24 && decFmt.uvoff == 0 && decFmt.nrmoff == 8 && decFmt.posoff == 12) {
 		jitted_ = steps_[0] == &VertexDecoder::Step_TcU16Prescale ? &VdecHand_Tu16pre_Ns8_Pf : &VdecHand_Tu16_Ns8_Pf;
 		return;
 	}
 	// W: float, one or two, skinned  T: u8 prescaled  C: 4444  N: s8  P: float
-	if (!noHand && skinInDecode && (nweights == 1 || nweights == 2) && numSteps_ == 5 && steps_[0] == &VertexDecoder::Step_WeightsFloatSkin &&
+	if (skinInDecode && (nweights == 1 || nweights == 2) && numSteps_ == 5 && steps_[0] == &VertexDecoder::Step_WeightsFloatSkin &&
 		steps_[1] == &VertexDecoder::Step_TcU8Prescale && steps_[2] == &VertexDecoder::Step_Color4444 &&
 		steps_[3] == &VertexDecoder::Step_NormalS8Skin && steps_[4] == &VertexDecoder::Step_PosFloatSkin && morphcount == 1 &&
 		VertexSize() == 20 + 4 * nweights && weightoff == 0 && tcoff == 4 * nweights && coloff == 4 * nweights + 2 &&
@@ -1410,7 +1408,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		return;
 	}
 	// W: u8, one to three, skinned  T: u8 prescaled  N: s8  P: s16
-	if (!noHand && skinInDecode && nweights >= 1 && nweights <= 3 && numSteps_ == 4 && steps_[0] == &VertexDecoder::Step_WeightsU8Skin &&
+	if (skinInDecode && nweights >= 1 && nweights <= 3 && numSteps_ == 4 && steps_[0] == &VertexDecoder::Step_WeightsU8Skin &&
 		steps_[1] == &VertexDecoder::Step_TcU8Prescale && steps_[2] == &VertexDecoder::Step_NormalS8Skin &&
 		steps_[3] == &VertexDecoder::Step_PosS16Skin && morphcount == 1 && weightoff == 0 && tcoff == nweights &&
 		nrmoff == nweights + 2 && posoff == (nweights == 1 ? 6 : 8) && VertexSize() == (nweights == 1 ? 12 : 14) &&
@@ -1419,7 +1417,7 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 		return;
 	}
 	// T: u8 prescaled  C: 565  P: s16
-	if (!noHand && numSteps_ == 3 && steps_[0] == &VertexDecoder::Step_TcU8Prescale && steps_[1] == &VertexDecoder::Step_Color565 &&
+	if (numSteps_ == 3 && steps_[0] == &VertexDecoder::Step_TcU8Prescale && steps_[1] == &VertexDecoder::Step_Color565 &&
 		steps_[2] == &VertexDecoder::Step_PosS16 && morphcount == 1 && VertexSize() == 10 && tcoff == 0 && coloff == 2 && posoff == 4 &&
 		decFmt.stride == 24 && decFmt.uvoff == 0 && decFmt.c0off == 8 && decFmt.posoff == 12) {
 		jitted_ = &VdecHand_Tu8pre_C565_Ps16;
@@ -1429,12 +1427,12 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 	// Only use the handwritten decoders if we have SSE or NEON. Don't want to use these on RISC-V, probably?
 	// See GetVertTypeID
 	uint32_t fmtWithoutSkinFlag = (fmt_ & ~0x04000000);
-	if (!noHand && fmtWithoutSkinFlag == (GE_VTYPE_TC_8BIT | GE_VTYPE_COL_5551 | GE_VTYPE_POS_16BIT)) {
+	if (fmtWithoutSkinFlag == (GE_VTYPE_TC_8BIT | GE_VTYPE_COL_5551 | GE_VTYPE_POS_16BIT)) {
 		// Can skip looking up in the JIT.
 		jitted_ = &VtxDec_Tu8_C5551_Ps16;
 		return;
 	}
-	if (!noHand && !options.expand8BitNormalsToFloat && fmtWithoutSkinFlag == (GE_VTYPE_TC_16BIT | GE_VTYPE_NRM_8BIT | GE_VTYPE_COL_8888 | GE_VTYPE_POS_FLOAT)) {
+	if (!options.expand8BitNormalsToFloat && fmtWithoutSkinFlag == (GE_VTYPE_TC_16BIT | GE_VTYPE_NRM_8BIT | GE_VTYPE_COL_8888 | GE_VTYPE_POS_FLOAT)) {
 		jitted_ = &VtxDec_Tu16_C8888_Pfloat;
 		return;
 	}

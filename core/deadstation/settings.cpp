@@ -75,25 +75,13 @@ void apply()
 	g_Config.iTexFiltering = TEX_FILTER_AUTO;
 	// the game's own settings: God of War's Frame Rate (60 unless picked) and Motion Blur (Off unless picked)
 	g_Config.iGodOfWarFrameRate = fileValue("game", "FrameRate", 60) == 30 ? 30 : 60;
-	// tests: DEADSTATION_PORTABLE_FRAMERATE=30 or 60, over the game's saved Frame Rate
-	if (const char *test = getenv("DEADSTATION_PORTABLE_FRAMERATE"); test != nullptr && *test != '\0')
-		g_Config.iGodOfWarFrameRate = atoi(test) == 30 ? 30 : 60;
 	g_Config.bMotionBlur = fileValue("game", "MotionBlur", 1) != 0;
-	// tests: DEADSTATION_PORTABLE_MOTIONBLUR=0 or 1, over the files
-	if (const char *blur = getenv("DEADSTATION_PORTABLE_MOTIONBLUR"); blur != nullptr && *blur != '\0')
-		g_Config.bMotionBlur = atoi(blur) != 0;
-	// tests: DEADSTATION_PORTABLE_PSPCLOCK=MHz, the emulated PSP's CPU held there whatever the game asks (0: the game's own)
-	if (const char *clock = getenv("DEADSTATION_PORTABLE_PSPCLOCK"); clock != nullptr && *clock != '\0')
-		g_Config.iLockedCPUSpeed = atoi(clock);
 	// tests: DEADSTATION_PORTABLE_GELATE=0 or 1, GE interrupts always exact or always when the GE's thread gets to them, not chosen
 	// by measurement (GPU/GeThread.h)
 	if (const char *late = getenv("DEADSTATION_PORTABLE_GELATE"); late != nullptr && *late != '\0') {
 		ge::lateMode = atoi(late) != 0 ? 1 : 0;
 		ge::lateEvents = ge::lateMode == 1;
 	}
-	// tests: DEADSTATION_PORTABLE_CPU=0, 1 or 3 (interpreter, JIT, IR JIT)
-	if (const char *cpu = getenv("DEADSTATION_PORTABLE_CPU"); cpu != nullptr && *cpu != '\0')
-		g_Config.iCpuCore = atoi(cpu);
 }
 
 bool showFps()

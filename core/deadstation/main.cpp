@@ -13,9 +13,8 @@
 // Environment (launch.sh): DEADSTATION_PORTABLE_HOME (settings, saves, save states), DEADSTATION_PORTABLE_ROM (the file NextUI
 // started, for the menu's title).
 // Tests: DEADSTATION_PORTABLE_STATE=<file> loads that save state once the game is running; DEADSTATION_PORTABLE_PERF=1 logs a
-// perf line a second; DEADSTATION_PORTABLE_RESOLUTION=1|2, DEADSTATION_PORTABLE_PICTURE=0|1|2, DEADSTATION_PORTABLE_CPU=0|1|3 (settings.cpp); _PROF (profiler.h);
-// _TIMESTAMPS GPU time per pass; _SHOT_AT, _WALK a picture and the stick at moments of the game's clock; SIGUSR1 puts
-// the page on show into /tmp/dsp-shot.ppm.
+// perf line a second; DEADSTATION_PORTABLE_RESOLUTION=1|2, DEADSTATION_PORTABLE_PICTURE=0|1|2 (settings.cpp); _PROF (profiler.h);
+// _SHOT_AT a picture at a moment of the game's clock; SIGUSR1 puts the page on show into /tmp/dsp-shot.ppm.
 #include "audio.h"
 #include "clock.h"
 #include "controls.h"
@@ -36,7 +35,6 @@
 #include "Common/File/VFS/DirectoryReader.h"
 #include "Common/File/VFS/VFS.h"
 #include "Common/GPU/Vulkan/VulkanContext.h"
-#include "Common/GPU/Vulkan/VulkanRenderManager.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/GPU/thin3d_create.h"
 #include "Common/GraphicsContext.h"
@@ -51,7 +49,6 @@
 #include "Core/CoreTiming.h"
 #include "Core/FileSystems/BlockDevices.h"
 #include "Core/FrameTiming.h"
-#include "Core/HLE/sceCtrl.h"
 #include "Core/HLE/sceDisplay.h"
 #include "Core/HW/Display.h"
 #include "Core/MemMap.h"
@@ -85,8 +82,6 @@
 #include <vector>
 
 using namespace deadstation;
-
-namespace MIPSComp { void JitFallbackReport(); }	// Core/MIPS/ARM64/Arm64Jit.cpp
 
 
 OnScreenDisplay g_OSD;
@@ -666,18 +661,7 @@ int main(int argc, char **argv)
 	Draw::DrawContext *draw = graphics.GetDrawContext();
 	ge::start({
 		[draw] {
-			static const bool timestamps = getenv("DEADSTATION_PORTABLE_TIMESTAMPS") != nullptr;
-			draw->BeginFrame(timestamps ? Draw::DebugFlags::PROFILE_TIMESTAMPS : Draw::DebugFlags::NONE);
-			if (timestamps)
-			{
-				static int count = 0;
-				if (++count % 40 == 0)
-				{
-					VulkanRenderManager *rm = (VulkanRenderManager *)draw->GetNativeObject(Draw::NativeObject::RENDER_MANAGER);
-					printf("gpuprofile:\n%s\n", rm->GetGpuProfileString().c_str());
-					fflush(stdout);
-				}
-			}
+			draw->BeginFrame(Draw::DebugFlags::NONE);
 			gpu->BeginHostFrame();
 		},
 		[draw](bool force) { return hostFrameEnd(draw, force); },
@@ -697,18 +681,12 @@ int main(int argc, char **argv)
 	jitcache::start((GetSysDirectory(DIRECTORY_APP_CACHE) / (g_paramSFO.GetDiscID() + ".jitblocks")).ToString());
 	cpufreq::start();
 
-	// (tests) the walk test holds the stick itself, in the loop
-	const bool padThreaded = getenv("DEADSTATION_PORTABLE_WALK") == nullptr;
-	std::thread pad;
-	if (padThreaded)
-	{
-		padRunning = true;
-		pad = std::thread(padThread);
-	}
+	padRunning = true;
+	std::thread pad(padThread);
 
 	while (!quit)
 	{
-		const auto events = padThreaded ? takePadEvents() : padEvents();
+		const auto events = takePadEvents();
 		if (menu::isOpen())
 		{
 			controls::toMenu();
@@ -814,46 +792,15 @@ int main(int argc, char **argv)
 				std::rename("/tmp/dsp-shot.ppm.tmp", "/tmp/dsp-shot.ppm");
 			}
 		}
-		// (tests) DEADSTATION_PORTABLE_STATE_EVERY=seconds: the test state loaded again that often
-		static const double stateEvery = getenv("DEADSTATION_PORTABLE_STATE_EVERY") ? atof(getenv("DEADSTATION_PORTABLE_STATE_EVERY")) : 0.0;
-		static std::string stateAgain;
-		static double stateAgainAt = 0.0;
 		if (testState != nullptr && *testState != '\0' && perfFrames > 0)
 		{
 			ge::pause();
 			DS_LOG("test: state %s %s", testState, states::load(testState) ? "loaded" : "NOT loaded");
-			if (stateEvery > 0.0) {
-				stateAgain = testState;
-				stateAgainAt = time_now_d() + stateEvery;
-			}
 			testState = nullptr;
 			audio::clear();
 			__DisplaySetWasPaused();
 		}
-		else if (!stateAgain.empty() && time_now_d() >= stateAgainAt)
-		{
-			ge::pause();
-			states::load(stateAgain);
-			stateAgainAt = time_now_d() + stateEvery;
-			audio::clear();
-			__DisplaySetWasPaused();
-		}
 
-		if (!padThreaded)
-			controls::update();
-		// (tests) the stick held forward for a stretch of the game's own clock: DEADSTATION_PORTABLE_WALK=from,to in vblanks since the state
-		static const char *walk = getenv("DEADSTATION_PORTABLE_WALK");
-		static int walkBase = -1;
-		if (walk != nullptr && testState == nullptr)
-		{
-			if (walkBase < 0)
-				walkBase = __DisplayGetVCount();
-			int from = 0, to = 0;
-			sscanf(walk, "%d,%d", &from, &to);
-			const int v = __DisplayGetVCount() - walkBase;
-			if (v >= from && v < to)
-				__CtrlSetAnalogXY(CTRL_STICK_LEFT, 0.f, 1.f);
-		}
 		{
 			static bool once = false;
 			if (!once) {
@@ -973,15 +920,10 @@ int main(int argc, char **argv)
 			runWorst = 0;
 		}
 	}
-	if (padThreaded)
-	{
-		padRunning = false;
-		pad.join();
-	}
+	padRunning = false;
+	pad.join();
 
 	DS_LOG("quitting");
-	if (getenv("DEADSTATION_PORTABLE_JITFALLBACKS") != nullptr)
-		MIPSComp::JitFallbackReport();
 	cpufreq::stop();
 	ge::pause();
 	jitcache::finish();
