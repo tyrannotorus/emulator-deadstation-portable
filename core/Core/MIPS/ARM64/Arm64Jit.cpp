@@ -282,6 +282,7 @@ MIPSOpcode Arm64Jit::GetOffsetInstruction(int offset) {
 
 void Arm64Jit::DoJit(u32 em_address, JitBlock *b) {
 	js.Begin(b);
+	const u8 *hotStart = GetCodePtr();
 
 	// We add a downcount flag check before the block, used when entering from a linked block.
 	// The last block decremented downcounter, and the flag should still be available.
@@ -361,7 +362,6 @@ void Arm64Jit::DoJit(u32 em_address, JitBlock *b) {
 		}
 	}
 
-	FlushIcache();
 	const u8 *hotCode = GetCodePtr();
 	u8 *hotWritable = GetWritableCodePtr();
 	SetCodePointer(coldCode_, GetWritablePtrFromCodePtr(coldCode_));
@@ -390,6 +390,9 @@ void Arm64Jit::DoJit(u32 em_address, JitBlock *b) {
 	coldCode_ = GetCodePtr();
 	FlushIcache();
 	SetCodePointer(hotCode, hotWritable);
+	// Only now: the hot code's branches to its stubs were written just above, into what had been placeholders (NOPs). Fetched
+	// stale, an exit is a NOP and the block runs on past its end.
+	FlushIcacheSection(hotStart, hotCode);
 
 	char temp[256];
 
