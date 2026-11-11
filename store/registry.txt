@@ -1,1 +1,2 @@
 # The recomp modules Deadstation Portable's store lists: one GitHub repository a line, owner/name.
+tyrannotorus/emulator-deadstation-portable-recomp-soulcalibur-broken-destiny
