@@ -93,13 +93,24 @@ void quietRunRaised(const char *what, int id)
 		std::fprintf(stderr, "Deadstation Portable: A STALL UPDATE RUN WITHOUT A WAIT RAISED A GE %s (list %d): it reaches the game late\n", what, id);
 	told++;
 }
-std::atomic<u64> busyTotal { 0 }, waitedTotal { 0 }, cpuTotal { 0 };
+u64 nowNs()
+{
+	return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// (perf) the times the perf line shows, measured only for it: each is a clock read, some a system call
+bool measuring = false;
+std::atomic<u64> idleTotal { 0 }, idleSince { 0 }, startNs { 0 }, busyHere { 0 }, waitedTotal { 0 };
 
 // (perf) the CPU thread's waits for the GE's, by the code that waited: offsets in the binary, for addr2line on the unstripped one
 struct WaitSite { uintptr_t at = 0; u64 ns = 0; u32 count = 0; };
 WaitSite waitSites[16];
-void noteWait(const void *at, u64 ns)
+void noteWait(const void *at, u64 from)
 {
+	if (!measuring)
+		return;
+	const u64 ns = nowNs() - from;
+	waitedTotal += ns;
 	for (WaitSite &site : waitSites)
 	{
 		if (site.at == (uintptr_t)at || site.at == 0)
@@ -110,11 +121,6 @@ void noteWait(const void *at, u64 ns)
 			return;
 		}
 	}
-}
-
-u64 nowNs()
-{
-	return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 void openFrame()
@@ -191,7 +197,15 @@ void loop()
 	std::unique_lock<std::mutex> lock(mutex);
 	while (true)
 	{
-		wake.wait(lock, [] { return stopping || !queue.empty(); });
+		if (measuring && queue.empty() && !stopping)
+		{
+			idleSince = nowNs();
+			wake.wait(lock, [] { return stopping || !queue.empty(); });
+			idleTotal += nowNs() - idleSince;
+			idleSince = 0;
+		}
+		else
+			wake.wait(lock, [] { return stopping || !queue.empty(); });
 		if (queue.empty())
 			break;
 		const Command command = queue.front();
@@ -199,20 +213,18 @@ void loop()
 		working = true;
 		runningSeq = command.seq;
 		runningFrameEnd = command.kind == Command::FrameEnd;
-		if (runningFrameEnd)
+		// Every wait for this thread is for the queue to run out (syncLists' and idleSync's also when only a frame's end is
+		// left) or for a frame's end to be done: the CPU thread is woken only when one of those can be true.
+		if (runningFrameEnd && queue.empty())
 			done.notify_all();
 		lock.unlock();
-		const u64 from = nowNs();
 		run(command);
-		busyTotal += nowNs() - from;
-		timespec cpu;
-		clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
-		cpuTotal = (u64)cpu.tv_sec * 1000000000 + cpu.tv_nsec;
 		lock.lock();
 		working = false;
 		if (command.kind == Command::FrameEnd)
 			framesAhead--;
-		done.notify_all();
+		if (queue.empty() || command.kind == Command::FrameEnd)
+			done.notify_all();
 	}
 }
 
@@ -289,7 +301,7 @@ void runListsHere(u64 ticks)
 		return;
 	}
 	{
-		const u64 from = nowNs();
+		const u64 from = measuring ? nowNs() : 0;
 		bool waited = false;
 		{
 			std::unique_lock<std::mutex> lock(mutex);
@@ -298,15 +310,16 @@ void runListsHere(u64 ticks)
 			done.wait(lock, [] { return !working && queue.empty(); });
 		}
 		if (waited)
-			{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
+			noteWait(caller, from);
 	}
 	// what the GE raised before these lists reaches the game ahead of what they raise
 	release(postedSeq);
 	// the GE's thread is idle, and only this thread posts to it: the host frame and the GPU are this thread's until it does
-	const u64 from = nowNs();
+	const u64 from = measuring ? nowNs() : 0;
 	openFrame();
 	gpu->ProcessDLQueue(ticks);
-	busyTotal += nowNs() - from;
+	if (measuring)
+		busyHere += nowNs() - from;
 }
 
 bool active()
@@ -398,7 +411,7 @@ void endFrame(bool force)
 	post(c);
 	prevFrameEndSeq = lastFrameEndSeq;
 	lastFrameEndSeq = postedSeq;
-	const u64 from = nowNs();
+	const u64 from = measuring ? nowNs() : 0;
 	bool waited = false;
 	{
 		std::unique_lock<std::mutex> lock(mutex);
@@ -407,7 +420,7 @@ void endFrame(bool force)
 		done.wait(lock, [] { return framesAhead <= 1; });
 	}
 	if (waited)
-		{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
+		noteWait(caller, from);
 	// at most this frame's end is still ahead: everything up to the last one has run
 	release(prevFrameEndSeq);
 }
@@ -422,7 +435,7 @@ void sync()
 	const void *caller = __builtin_return_address(0);
 	if (running && !onThread())
 	{
-		const u64 from = nowNs();
+		const u64 from = measuring ? nowNs() : 0;
 		bool waited = false;
 		{
 			std::unique_lock<std::mutex> lock(mutex);
@@ -431,7 +444,7 @@ void sync()
 			done.wait(lock, [] { return !working && queue.empty(); });
 		}
 		if (waited)
-			{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
+			noteWait(caller, from);
 	}
 	release(postedSeq);
 }
@@ -441,7 +454,7 @@ void syncLists()
 	const void *caller = __builtin_return_address(0);
 	if (running && !onThread())
 	{
-		const u64 from = nowNs();
+		const u64 from = measuring ? nowNs() : 0;
 		bool waited = false;
 		{
 			std::unique_lock<std::mutex> lock(mutex);
@@ -450,7 +463,7 @@ void syncLists()
 			done.wait(lock, [] { return queue.empty() && (!working || runningFrameEnd); });
 		}
 		if (waited)
-			{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
+			noteWait(caller, from);
 	}
 	release(postedSeq);
 }
@@ -460,12 +473,12 @@ bool idleSync()
 	if (!running || onThread())
 		return false;
 	const void *caller = __builtin_return_address(0);
-	const u64 from = nowNs();
+	const u64 from = measuring ? nowNs() : 0;
 	{
 		std::unique_lock<std::mutex> lock(mutex);
 		done.wait(lock, [] { return queue.empty() && (!working || runningFrameEnd); });
 	}
-	{ const u64 waitedFor = nowNs() - from; waitedTotal += waitedFor; noteWait(caller, waitedFor); }
+	noteWait(caller, from);
 	const bool any = eventsWaiting.load(std::memory_order_relaxed);
 	release(postedSeq);
 	return any;
@@ -554,8 +567,28 @@ void deliverEvents()
 	}
 }
 
-u64 busyNs() { return busyTotal; }
-u64 cpuNs() { return cpuTotal; }
+void measure(bool on)
+{
+	measuring = on;
+	startNs = nowNs();
+}
+
+u64 busyNs()
+{
+	// the GE's thread's time not asleep for want of work, and the lists run on the CPU thread
+	const u64 now = nowNs(), since = idleSince;
+	return now - startNs - idleTotal - (since != 0 ? now - since : 0) + busyHere;
+}
+
+u64 cpuNs()
+{
+	clockid_t clock;
+	timespec t;
+	if (!running || pthread_getcpuclockid(thread.native_handle(), &clock) != 0 || clock_gettime(clock, &t) != 0)
+		return 0;
+	return (u64)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
 u64 waitedNs() { return waitedTotal; }
 
 std::string takeWaitSites()

@@ -90,7 +90,9 @@ extern int lateMode;
 bool idleSync();
 void deliverEvents();
 
-// (tests) nanoseconds so far: the GE's thread at work, the CPU thread waiting for it
+// (tests) nanoseconds so far: the GE's thread at work, the CPU thread waiting for it. Measured only once asked for (measure,
+// before start): each measurement is a clock read.
+void measure(bool on);
 u64 busyNs();
 u64 cpuNs();
 u64 waitedNs();

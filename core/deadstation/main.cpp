@@ -659,6 +659,7 @@ int main(int argc, char **argv)
 	audio::start();
 
 	Draw::DrawContext *draw = graphics.GetDrawContext();
+	ge::measure(getenv("DEADSTATION_PORTABLE_PERF") != nullptr);
 	ge::start({
 		[draw] {
 			draw->BeginFrame(Draw::DebugFlags::NONE);
