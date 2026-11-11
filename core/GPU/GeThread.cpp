@@ -57,7 +57,6 @@ std::deque<Command> queue;
 bool working = false;
 bool runningFrameEnd = false;
 bool stopping = false;
-int framesAhead = 0;
 
 std::mutex eventsMutex;
 std::vector<Event> events;
@@ -213,17 +212,15 @@ void loop()
 		working = true;
 		runningSeq = command.seq;
 		runningFrameEnd = command.kind == Command::FrameEnd;
-		// Every wait for this thread is for the queue to run out (syncLists' and idleSync's also when only a frame's end is
-		// left) or for a frame's end to be done: the CPU thread is woken only when one of those can be true.
+		// Every wait for this thread is for the queue to run out (endFrame's, syncLists' and idleSync's also when only a frame's
+		// end is left): the CPU thread is woken only when that can be true.
 		if (runningFrameEnd && queue.empty())
 			done.notify_all();
 		lock.unlock();
 		run(command);
 		lock.lock();
 		working = false;
-		if (command.kind == Command::FrameEnd)
-			framesAhead--;
-		if (queue.empty() || command.kind == Command::FrameEnd)
+		if (queue.empty())
 			done.notify_all();
 	}
 }
@@ -234,8 +231,6 @@ void post(Command command)
 		std::lock_guard<std::mutex> lock(mutex);
 		command.seq = ++postedSeq;
 		queue.push_back(command);
-		if (command.kind == Command::FrameEnd)
-			framesAhead++;
 	}
 	wake.notify_one();
 }
@@ -415,13 +410,13 @@ void endFrame(bool force)
 	bool waited = false;
 	{
 		std::unique_lock<std::mutex> lock(mutex);
-		if (framesAhead > 1)
+		if (!queue.empty() || (working && !runningFrameEnd))
 			waited = true;
-		done.wait(lock, [] { return framesAhead <= 1; });
+		done.wait(lock, [] { return queue.empty() && (!working || runningFrameEnd); });
 	}
 	if (waited)
 		noteWait(caller, from);
-	// at most this frame's end is still ahead: everything up to the last one has run
+	// what the GE raised reaches the game a frame on, as before: everything up to the last frame's end
 	release(prevFrameEndSeq);
 }
 

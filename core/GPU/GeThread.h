@@ -48,7 +48,8 @@ void pspFrame();
 void flipped();
 void skipFrame(bool skip);
 void invalidate(u32 addr, int size, GPUInvalidationType type);
-// a guest frame has ended: at most one more may be ahead of the GE
+// A guest frame has ended: the game goes on once the GE has run its lists (the host frame's end, the flip's wait in it, can still
+// overlap the next frame). A GE a frame behind would read what the game has since rewritten for its next one.
 void endFrame(bool force);
 // has anything been posted that could change the picture, since the last call
 bool takeWorked();
