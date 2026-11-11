@@ -517,57 +517,6 @@ int DrawEngineCommon::ComputeNumVertsToDecode() const {
 	return sum;
 }
 
-// Takes a list of consecutive PRIM opcodes, and extends the current draw call to include them.
-// This is just a performance optimization.
-int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, int *verts, bool isTriangle) {
-	const uint32_t *start = cmd;
-	int prevDrawVerts = numDrawVerts_ - 1;
-	DeferredVerts &dv = drawVerts_[prevDrawVerts];
-	int offset = dv.vertexCount;
-
-	_dbg_assert_(numDrawInds_ <= MAX_DEFERRED_DRAW_INDS);  // if it's equal, the check below will take care of it before any action is taken.
-	_dbg_assert_(numDrawVerts_ > 0);
-
-	if (!clockwise) {
-		anyCCWOrIndexed_ = true;
-	}
-	int seenPrims = 0;
-	int numDrawInds = numDrawInds_;
-	while (cmd != stall) {
-		uint32_t data = *cmd;
-		if ((data & 0xFFF80000) != 0x04000000) {
-			break;
-		}
-		GEPrimitiveType newPrim = static_cast<GEPrimitiveType>((data >> 16) & 7);
-		if (IsTrianglePrim(newPrim) != isTriangle)
-			break;
-		int vertexCount = data & 0xFFFF;
-		if (numDrawInds >= MAX_DEFERRED_DRAW_INDS || vertexCountInDrawCalls_ + offset + vertexCount > VERTEX_BUFFER_MAX) {
-			break;
-		}
-		DeferredInds &di = drawInds_[numDrawInds++];
-		di.indexType = 0;
-		di.prim = newPrim;
-		seenPrims |= (1 << newPrim);
-		di.clockwise = clockwise;
-		di.vertexCount = vertexCount;
-		di.vertDecodeIndex = prevDrawVerts;
-		di.offset = offset;
-		offset += vertexCount;
-		cmd++;
-	}
-	numDrawInds_ = numDrawInds;
-	seenPrims_ |= seenPrims;
-
-	int totalCount = offset - dv.vertexCount;
-	dv.vertexCount = offset;
-	dv.indexUpperBound = dv.vertexCount - 1;
-	vertexCountInDrawCalls_ += totalCount;
-	*bytesRead = totalCount * dec->VertexSize();
-	*verts = totalCount;
-	return cmd - start;
-}
-
 void DrawEngineCommon::SkipPrim(GEPrimitiveType prim, int vertexCount, const VertexDecoder *dec, u32 vertTypeID, int *bytesRead) {
 	if (!indexGen.PrimCompatible(prevPrim_, prim)) {
 		Flush();

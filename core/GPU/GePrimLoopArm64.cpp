@@ -1,7 +1,6 @@
-// Deadstation Portable: Execute_Prim's lookahead (the commands after a PRIM, read on from it) in hand-written ARM64, for the
-// commands it meets most. The C++ loop in GPUCommonHW.cpp is the rule: what this does to the state is what it does, command for
-// command, and any command or case this doesn't take goes back to it untouched (PrimLoop: s->src at it, s->bail as the C++
-// would leave the lookahead there). Field offsets come from the compiler (offsetof), named once below.
+// Deadstation Portable: Execute_Prim's lookahead (the commands after a PRIM, read on from it) in hand-written ARM64. Upstream's C++
+// loop is the rule it keeps (draws merged and queued, state words kept, the GE time charged); a command it doesn't take goes back to
+// Execute_Prim untouched (PrimLoop: s->src at it; s->bail where the lookahead ends). Field offsets come from the compiler (offsetof).
 //
 // void GPUCommonHW::PrimLoopArm64(GPUCommonHW *gpu, PrimLoop *s): the state's pointers come in s
 // Registers: x19 s, x20 gstate.cmdmem, x21 src, x22 stall, x23 the draw engine, x24 gstate_c, x25 its batch fields, x26 the
@@ -291,7 +290,7 @@ __attribute__((naked)) void GPUCommonHW::PrimLoopArm64(GPUCommonHW *gpu, PrimLoo
 		"	ldrb	w12, [x19, #PL_canExtend]\n"
 		"	cbnz	w12, .Lpl_extend\n"
 
-		// a draw of its own: first every case the C++ takes, before anything changes
+		// a draw of its own: first every case Execute_Prim takes, before anything changes
 		"	tst	w27, #VT_IDX\n"
 		"	b.ne	.Lpl_out\n"                        // indexed
 		"	ldr	w16, [x24, #GSC_vaddr]\n"
@@ -325,7 +324,7 @@ __attribute__((naked)) void GPUCommonHW::PrimLoopArm64(GPUCommonHW *gpu, PrimLoo
 		"	add	w12, w12, w14\n"
 		"	cmp	w12, #16, lsl #12\n"
 		"	b.gt	.Lpl_out\n"
-		// it's this loop's: the C++'s order from here
+		// it's this loop's
 		"	ldrb	w12, [x19, #PL_isTriangle]\n"
 		"	strb	w12, [x19, #PL_canExtend]\n"
 		"	mov	w17, w16\n"                       // ReadThroughUploads: vertices just copied into VRAM are read where they came from
@@ -455,7 +454,7 @@ __attribute__((naked)) void GPUCommonHW::PrimLoopArm64(GPUCommonHW *gpu, PrimLoo
 		"	str	w13, [x19, #PL_total]\n"
 		"	b	.Lpl_next\n"
 
-		// ExtendNonIndexedPrim: the PRIMs from here, while they're PRIMs of this kind and fit, onto the last draw's vertices.
+		// Merging: the PRIMs from here, while they're PRIMs of this kind and fit, onto the last draw's vertices.
 		// x13 that draw, w16 the offset (its vertices so far), w17 its count before, x8 the next record, w6 a record's word at
 		// DI_decIndex (the draw, index type 0, the type, the winding), x2 where the records or the commands end, w4 the vertices
 		// that still fit, w7 the types of this kind (a bit each), w0 the types seen, x5 the command
@@ -532,7 +531,7 @@ __attribute__((naked)) void GPUCommonHW::PrimLoopArm64(GPUCommonHW *gpu, PrimLoo
 		"	mul	w6, w6, w9\n"
 		"	str	w6, [x19, #PL_bytesRead]\n"
 		"	cmp	x5, x21\n"
-		"	b.eq	.Lpl_bail\n"                      // not even this one: the C++ leaves the lookahead
+		"	b.eq	.Lpl_bail\n"                      // not even this one: the lookahead ends
 		"	sub	x21, x5, #4\n"
 		"	ldr	w7, [x24, #GSC_vaddr]\n"
 		"	add	w7, w7, w6\n"

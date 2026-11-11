@@ -870,8 +870,8 @@ static inline void ReadThroughUploads(DrawEngineCommon *engine, const void *&ver
 	}
 }
 
-// The lookahead's CALL: a bone matrix's list (twelve words and a RET) loaded here, read where a CALL reads it (one just copied into
-// VRAM is still at its source); false if it isn't one, and the lookahead ends.
+// The lookahead's CALL (PrimLoopArm64): a bone matrix's list (twelve words and a RET) loaded here, read where a CALL reads it (one
+// just copied into VRAM is still at its source); false if it isn't one, and the lookahead ends.
 bool GPUCommonHW::PrimLoopBoneCall(u32 data) {
 	const u32 target = g_vramAlias.listAddress(gstate_c.getRelativeAddress(data & 0x00FFFFFC));
 	if (Memory::IsValidRange(target, 13 * 4) &&
@@ -1064,78 +1064,47 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 	const u32_le *start = (const u32_le *)Memory::GetPointerUnchecked(currentList->pc + 4);
 	const u32_le *src = start;
 	const u32_le *stall = currentList->stall ? (const u32_le *)Memory::GetPointerUnchecked(currentList->stall) : 0;
-
-	// Optimized submission of sequences of PRIM. Allows us to avoid going through all the mess
-	// above for each one. This can be expanded to support additional games that intersperse
-	// PRIM commands with other commands. A special case is Earth Defence Force 2 that changes culling mode
-	// between each prim, we just change the triangle winding right here to still be able to join draw calls.
-
 	const uint32_t vtypeCheckMask = g_Config.bSoftwareSkinning ? (~GE_VTYPE_WEIGHTCOUNT_MASK) : 0xFFFFFFFF;
 
+	// The lookahead is hand-written ARM64 (PrimLoopArm64). It leaves two commands to the switch below: a PRIM it can't queue as
+	// it is (indexed, a flush first, SubmitPrim's rare cases) and a vertex type whose decoder isn't made yet.
+	using DI = DrawEngineCommon::DeferredInds;
+	using DV = DrawEngineCommon::DeferredVerts;
+	static_assert(sizeof(DI::inds) == 8 && sizeof(DI::vertexCount) == 4 && sizeof(DI::offset) == 2 && sizeof(DV::verts) == 8 &&
+		sizeof(DV::uvScale) == 16 && sizeof(DV::vertexCount) == 4 && sizeof(DV::indexLowerBound) == 2 && sizeof(DV::indexUpperBound) == 2 &&
+		sizeof(GEPrimitiveType) == 1 && sizeof(VertexDecoder::size) == 2 && sizeof(VertexDecoder::skinInDecode) == 1, "the widths PrimLoopArm64 uses");
+	static_assert(offsetof(DI, vertDecodeIndex) % 4 == 0 && offsetof(DI, indexType) == offsetof(DI, vertDecodeIndex) + 1 &&
+		offsetof(DI, prim) == offsetof(DI, vertDecodeIndex) + 2 && offsetof(DI, clockwise) == offsetof(DI, vertDecodeIndex) + 3,
+		"PrimLoopArm64 stores a record's four bytes from vertDecodeIndex as one word");
+	static_assert(DrawEngineCommon::MAX_DEFERRED_DRAW_VERTS == 128 && DrawEngineCommon::MAX_DEFERRED_DRAW_INDS == 512 && VERTEX_BUFFER_MAX == 65536,
+		"PrimLoopArm64's limits");
+
 	while (src != stall) {
-#if PPSSPP_ARCH(ARM64)
-		{
-			// the common commands in ARM64 (PrimLoopArm64), the same, command for command: back here at one it leaves to
-			// the switch below, or where the lookahead ends
-			// the widths PrimLoopArm64 stores and loads these with
-			static_assert(sizeof(PrimLoop::src) == 8 && sizeof(PrimLoop::decoder) == 8 && sizeof(PrimLoop::vertexType) == 4 && sizeof(PrimLoop::cullMode) == 4 && sizeof(PrimLoop::canExtend) == 1, "PrimLoop");
-			static_assert(sizeof(DrawEngineCommon::DeferredInds::inds) == 8 && sizeof(DrawEngineCommon::DeferredInds::vertexCount) == 4 && sizeof(DrawEngineCommon::DeferredInds::vertDecodeIndex) == 1 && sizeof(DrawEngineCommon::DeferredInds::indexType) == 1 &&
-				sizeof(DrawEngineCommon::DeferredInds::prim) == 1 && sizeof(DrawEngineCommon::DeferredInds::clockwise) == 1 && sizeof(DrawEngineCommon::DeferredInds::offset) == 2, "DeferredInds");
-			static_assert(sizeof(DrawEngineCommon::DeferredVerts::verts) == 8 && sizeof(DrawEngineCommon::DeferredVerts::uvScale) == 16 && sizeof(DrawEngineCommon::DeferredVerts::vertexCount) == 4 && sizeof(DrawEngineCommon::DeferredVerts::indexLowerBound) == 2 &&
-				sizeof(DrawEngineCommon::DeferredVerts::indexUpperBound) == 2, "DeferredVerts");
-			static_assert(sizeof(GEPrimitiveType) == 1 && sizeof(VertexDecoder::size) == 2 && sizeof(VertexDecoder::skinInDecode) == 1, "types");
-			// its four bytes from vertDecodeIndex on, stored as one word
-			static_assert(offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) % 4 == 0 &&
-				offsetof(DrawEngineCommon::DeferredInds, indexType) == offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) + 1 &&
-				offsetof(DrawEngineCommon::DeferredInds, prim) == offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) + 2 &&
-				offsetof(DrawEngineCommon::DeferredInds, clockwise) == offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) + 3, "DeferredInds' word");
-			static_assert(DrawEngineCommon::MAX_DEFERRED_DRAW_VERTS == 128 && DrawEngineCommon::MAX_DEFERRED_DRAW_INDS == 512 && VERTEX_BUFFER_MAX == 65536, "limits");
-			PrimLoop s { src, stall, decoder, drawEngineCommon_, gstate.cmdmem, &gstate_c, Memory::base, &gpuStats.numCulledDraws,
-				vertexType, vertTypeID, vtypeCheckMask, ((u32)gstate.getUVGenMode() << 24) | ((u32)g_Config.bSoftwareSkinning << 26),
-				cullMode, totalVertCount, bytesRead, canExtend, isTriangle, onePassed, g_vramAlias.pending(), false };
-			PrimLoopArm64(this, &s);
-			src = s.src;
-			decoder = s.decoder;
-			vertexType = s.vertexType;
-			vertTypeID = s.vertTypeID;
-			cullMode = s.cullMode;
-			totalVertCount = s.totalVertCount;
-			bytesRead = s.bytesRead;
-			canExtend = s.canExtend;
-			onePassed = s.onePassed;
-			if (s.bail)
-				goto bail;
-			if (src == stall)
-				break;
-		}
-#endif
+		PrimLoop s { src, stall, decoder, drawEngineCommon_, gstate.cmdmem, &gstate_c, Memory::base, &gpuStats.numCulledDraws,
+			vertexType, vertTypeID, vtypeCheckMask, ((u32)gstate.getUVGenMode() << 24) | ((u32)g_Config.bSoftwareSkinning << 26),
+			cullMode, totalVertCount, bytesRead, canExtend, isTriangle, onePassed, g_vramAlias.pending(), false };
+		PrimLoopArm64(this, &s);
+		src = s.src;
+		decoder = s.decoder;
+		vertexType = s.vertexType;
+		vertTypeID = s.vertTypeID;
+		cullMode = s.cullMode;
+		totalVertCount = s.totalVertCount;
+		bytesRead = s.bytesRead;
+		canExtend = s.canExtend;
+		onePassed = s.onePassed;
+		if (s.bail)
+			goto bail;
+		if (src == stall)
+			break;
+
 		uint32_t data = *src;
 		switch (data >> 24) {
 		case GE_CMD_PRIM:
 		{
 			GEPrimitiveType newPrim = static_cast<GEPrimitiveType>((data >> 16) & 7);
-			if (IsTrianglePrim(newPrim) != isTriangle)
-				goto bail;  // Can't join over this boundary. Might as well exit and get this on the next time around.
-			// TODO: more efficient updating of verts/inds
-
 			u32 count = data & 0xFFFF;
 			bool clockwise = !gstate.isCullEnabled() || gstate.getCullMode() == cullMode;
-			if (canExtend) {
-				// Non-indexed draws can be cheaply merged if vertexAddr hasn't changed, that means the vertices
-				// are consecutive in memory. We also ignore culling here.
-				_dbg_assert_((vertexType & GE_VTYPE_IDX_MASK) == GE_VTYPE_IDX_NONE);
-				int vertsAdded = 0;
-				int commandsExecuted = drawEngineCommon_->ExtendNonIndexedPrim(src, stall, decoder, vertTypeID, clockwise, &bytesRead, &vertsAdded, isTriangle);
-				if (!commandsExecuted) {
-					goto bail;
-				}
-				src += commandsExecuted - 1;
-				gstate_c.vertexAddr += bytesRead;
-				// every PRIM taken, each charged as if run alone
-				totalVertCount += vertsAdded;
-				break;
-			}
-
 			verts = Memory::GetPointerUnchecked(gstate_c.vertexAddr);
 			inds = nullptr;
 			if ((vertexType & GE_VTYPE_IDX_MASK) != GE_VTYPE_IDX_NONE) {
@@ -1178,105 +1147,13 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 			break;
 		}
 		case GE_CMD_VERTEXTYPE:
-		{
-			uint32_t diff = data ^ vertexType;
-			// don't mask upper bits, vertexType is unmasked
-			if (diff) {
-				if (diff & vtypeCheckMask)
-					goto bail;
-				drawEngineCommon_->FlushSkin();
-				canExtend = false;  // TODO: Might support extending between some vertex types in the future.
-				vertexType = data;
-				vertTypeID = GetVertTypeID(vertexType, gstate.getUVGenMode(), g_Config.bSoftwareSkinning);
-				decoder = drawEngineCommon_->GetVertexDecoder(vertTypeID);
-			}
-			break;
-		}
-		case GE_CMD_VADDR:
-		{
-			gstate.cmdmem[GE_CMD_VADDR] = data;
-			uint32_t newAddr = gstate_c.getRelativeAddress(data & 0x00FFFFFF);
-			if (gstate_c.vertexAddr != newAddr) {
-				canExtend = false;
-				gstate_c.vertexAddr = newAddr;
-			}
-			break;
-		}
-		case GE_CMD_IADDR:
-			gstate.cmdmem[GE_CMD_IADDR] = data;
-			gstate_c.indexAddr = gstate_c.getRelativeAddress(data & 0x00FFFFFF);
-			break;
-		case GE_CMD_OFFSETADDR:
-			gstate.cmdmem[GE_CMD_OFFSETADDR] = data;
-			gstate_c.offsetAddr = data << 8;
-			break;
-		case GE_CMD_BASE:
-			gstate.cmdmem[GE_CMD_BASE] = data;
-			break;
-		case GE_CMD_CULLFACEENABLE:
-			// Earth Defence Force 2
-			if (gstate.cmdmem[GE_CMD_CULLFACEENABLE] != data) {
-				goto bail;
-			}
-			break;
-		case GE_CMD_CULL:
-			// flip face by indices for triangles
-			cullMode = data & 1;
-			break;
-		case GE_CMD_TEXFLUSH:
-		case GE_CMD_NOP:
-		case GE_CMD_NOP_FF:
-			gstate.cmdmem[data >> 24] = data;
-			break;
-		case GE_CMD_BONEMATRIXNUMBER:
-			gstate.cmdmem[GE_CMD_BONEMATRIXNUMBER] = data;
-			break;
-		case GE_CMD_TEXSCALEU:
-			// We don't "dirty-check" - we could avoid getFloat24 and setting canExtend=false, but usually
-			// when texscale commands are in line with the prims like this, they actually have an effect
-			// and requires us to stop extending strips anyway.
-			gstate.cmdmem[GE_CMD_TEXSCALEU] = data;
-			gstate_c.uv.uScale = getFloat24(data);
+			drawEngineCommon_->FlushSkin();
 			canExtend = false;
+			vertexType = data;
+			vertTypeID = GetVertTypeID(vertexType, gstate.getUVGenMode(), g_Config.bSoftwareSkinning);
+			decoder = drawEngineCommon_->GetVertexDecoder(vertTypeID);
 			break;
-		case GE_CMD_TEXSCALEV:
-			gstate.cmdmem[GE_CMD_TEXSCALEV] = data;
-			gstate_c.uv.vScale = getFloat24(data);
-			canExtend = false;
-			break;
-		case GE_CMD_TEXOFFSETU:
-			gstate.cmdmem[GE_CMD_TEXOFFSETU] = data;
-			gstate_c.uv.uOff = getFloat24(data);
-			canExtend = false;
-			break;
-		case GE_CMD_TEXOFFSETV:
-			gstate.cmdmem[GE_CMD_TEXOFFSETV] = data;
-			gstate_c.uv.vOff = getFloat24(data);
-			canExtend = false;
-			break;
-		case GE_CMD_TEXLEVEL:
-			// Same Gran Turismo hack from Execute_TexLevel
-			if ((data & 3) != GE_TEXLEVEL_MODE_AUTO && (0x00FF0000 & data) != 0) {
-				goto bail;
-			}
-			gstate.cmdmem[GE_CMD_TEXLEVEL] = data;
-			break;
-		case GE_CMD_CALL:
-			// A bone matrix probably. If not we bail.
-			if (!PrimLoopBoneCall(data))
-				goto bail;
-			canExtend = false;
-			break;
-
-		// Keep going if these commands don't change state.
-		case GE_CMD_TEXBUFWIDTH0:
-		case GE_CMD_TEXADDR0:
-			if (data != gstate.cmdmem[data >> 24])
-				goto bail;
-			break;
-
 		default:
-			// All other commands might need a flush or something, stop this inner loop.
 			goto bail;
 		}
 		src++;

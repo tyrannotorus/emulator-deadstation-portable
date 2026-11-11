@@ -416,7 +416,7 @@ void endFrame(bool force)
 	}
 	if (waited)
 		noteWait(caller, from);
-	// what the GE raised reaches the game a frame on, as before: everything up to the last frame's end
+	// what the GE raised reaches the game a frame on: everything up to the last frame's end
 	release(prevFrameEndSeq);
 }
 
