@@ -117,7 +117,8 @@ public:
 		}
 	}
 
-	int ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle);
+	// the PRIMs from cmd on, while they're the same kind, added to the last draw: the commands taken; *verts the vertices added
+	int ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, int *verts, bool isTriangle);
 	// The bounds of a draw's indices. Asked for twice in a row, the second time costs nothing.
 	void IndexBounds(const void *inds, int count, u32 vertType, u16 *lower, u16 *upper) {
 		if (inds != nullptr && inds == boundsInds_ && count == boundsCount_ && vertType == boundsType_) {
@@ -196,6 +197,9 @@ public:
 	void FlushQueuedDepth();
 
 protected:
+	// its draws are queued from hand-written ARM64 too (GPUCommonHW::PrimLoopArm64)
+	friend class GPUCommonHW;
+
 	virtual bool UpdateUseHWTessellation(bool enabled) const { return enabled; }
 	void UpdatePlanes();
 

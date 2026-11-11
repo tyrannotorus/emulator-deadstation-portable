@@ -4,6 +4,8 @@
 
 // Shared GPUCommon implementation for the HW backends.
 // Things that are irrelevant for SoftGPU should live here.
+class VertexDecoder;
+
 class GPUCommonHW : public GPUCommon {
 public:
 	GPUCommonHW(GraphicsContext *gfxCtx, Draw::DrawContext *draw);
@@ -67,6 +69,35 @@ public:
 
 	void FastRunLoop(DisplayList &list) override;
 	void FlushDrawEngineForAsm();  // the ARM64 command loop's flush (GeRunLoopArm64.cpp)
+
+	// Execute_Prim's lookahead (the commands after a PRIM, read on from it), its common commands in hand-written ARM64
+	// (GePrimLoopArm64.cpp): the loop's state, both halves'
+	struct PrimLoop {
+		const u32_le *src;
+		const u32_le *stall;
+		VertexDecoder *decoder;
+		DrawEngineCommon *engine;
+		u32 *cmdmem;			// gstate.cmdmem
+		void *gstateC;			// &gstate_c
+		const u8 *base;			// Memory::base
+		int *numCulledDraws;	// &gpuStats.numCulledDraws
+		u32 vertexType;
+		u32 vertTypeID;
+		u32 vtypeCheckMask;
+		u32 idHigh;				// a vertex type's ID above its low 24 bits: the UV generation mode and software skinning
+		int cullMode;
+		int totalVertCount;
+		int bytesRead;
+		bool canExtend;
+		bool isTriangle;
+		bool onePassed;
+		bool vramPending;		// g_vramAlias.pending(): no command the loop runs changes it
+		bool bail;
+	};
+	// From s->src while the commands are its own: it stops at the stall, at a command the C++ runs (s->bail false), or at one
+	// the C++ would end the lookahead at (s->bail true).
+	static void PrimLoopArm64(GPUCommonHW *gpu, PrimLoop *s);
+	bool PrimLoopBoneCall(u32 data);
 	void ExecuteOp(u32 op, u32 diff) override;
 
 	bool PresentedThisFrame() const override;

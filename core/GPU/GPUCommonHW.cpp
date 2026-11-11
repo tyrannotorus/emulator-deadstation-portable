@@ -870,6 +870,23 @@ static inline void ReadThroughUploads(DrawEngineCommon *engine, const void *&ver
 	}
 }
 
+// The lookahead's CALL: a bone matrix's list (twelve words and a RET) loaded here, read where a CALL reads it (one just copied into
+// VRAM is still at its source); false if it isn't one, and the lookahead ends.
+bool GPUCommonHW::PrimLoopBoneCall(u32 data) {
+	const u32 target = g_vramAlias.listAddress(gstate_c.getRelativeAddress(data & 0x00FFFFFC));
+	if (Memory::IsValidRange(target, 13 * 4) &&
+		(Memory::ReadUnchecked_U32(target) >> 24) == GE_CMD_BONEMATRIXDATA &&
+		(Memory::ReadUnchecked_U32(target + 11 * 4) >> 24) == GE_CMD_BONEMATRIXDATA &&
+		(Memory::ReadUnchecked_U32(target + 12 * 4) >> 24) == GE_CMD_RET &&
+		(target > currentList->stall || target + 12 * 4 < currentList->stall) &&
+		(gstate.boneMatrixNumber & 0x00FFFFFF) <= 96 - 12) {
+		drawEngineCommon_->FlushSkin();
+		FastLoadBoneMatrix(target);
+		return true;
+	}
+	return false;
+}
+
 void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 	// This drives all drawing. All other state we just buffer up, then we apply it only
 	// when it's time to draw. As most PSP games set state redundantly ALL THE TIME, this is a huge optimization.
@@ -1056,6 +1073,42 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 	const uint32_t vtypeCheckMask = g_Config.bSoftwareSkinning ? (~GE_VTYPE_WEIGHTCOUNT_MASK) : 0xFFFFFFFF;
 
 	while (src != stall) {
+#if PPSSPP_ARCH(ARM64)
+		{
+			// the common commands in ARM64 (PrimLoopArm64), the same, command for command: back here at one it leaves to
+			// the switch below, or where the lookahead ends
+			// the widths PrimLoopArm64 stores and loads these with
+			static_assert(sizeof(PrimLoop::src) == 8 && sizeof(PrimLoop::decoder) == 8 && sizeof(PrimLoop::vertexType) == 4 && sizeof(PrimLoop::cullMode) == 4 && sizeof(PrimLoop::canExtend) == 1, "PrimLoop");
+			static_assert(sizeof(DrawEngineCommon::DeferredInds::inds) == 8 && sizeof(DrawEngineCommon::DeferredInds::vertexCount) == 4 && sizeof(DrawEngineCommon::DeferredInds::vertDecodeIndex) == 1 && sizeof(DrawEngineCommon::DeferredInds::indexType) == 1 &&
+				sizeof(DrawEngineCommon::DeferredInds::prim) == 1 && sizeof(DrawEngineCommon::DeferredInds::clockwise) == 1 && sizeof(DrawEngineCommon::DeferredInds::offset) == 2, "DeferredInds");
+			static_assert(sizeof(DrawEngineCommon::DeferredVerts::verts) == 8 && sizeof(DrawEngineCommon::DeferredVerts::uvScale) == 16 && sizeof(DrawEngineCommon::DeferredVerts::vertexCount) == 4 && sizeof(DrawEngineCommon::DeferredVerts::indexLowerBound) == 2 &&
+				sizeof(DrawEngineCommon::DeferredVerts::indexUpperBound) == 2, "DeferredVerts");
+			static_assert(sizeof(GEPrimitiveType) == 1 && sizeof(VertexDecoder::size) == 2 && sizeof(VertexDecoder::skinInDecode) == 1, "types");
+			// its four bytes from vertDecodeIndex on, stored as one word
+			static_assert(offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) % 4 == 0 &&
+				offsetof(DrawEngineCommon::DeferredInds, indexType) == offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) + 1 &&
+				offsetof(DrawEngineCommon::DeferredInds, prim) == offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) + 2 &&
+				offsetof(DrawEngineCommon::DeferredInds, clockwise) == offsetof(DrawEngineCommon::DeferredInds, vertDecodeIndex) + 3, "DeferredInds' word");
+			static_assert(DrawEngineCommon::MAX_DEFERRED_DRAW_VERTS == 128 && DrawEngineCommon::MAX_DEFERRED_DRAW_INDS == 512 && VERTEX_BUFFER_MAX == 65536, "limits");
+			PrimLoop s { src, stall, decoder, drawEngineCommon_, gstate.cmdmem, &gstate_c, Memory::base, &gpuStats.numCulledDraws,
+				vertexType, vertTypeID, vtypeCheckMask, ((u32)gstate.getUVGenMode() << 24) | ((u32)g_Config.bSoftwareSkinning << 26),
+				cullMode, totalVertCount, bytesRead, canExtend, isTriangle, onePassed, g_vramAlias.pending(), false };
+			PrimLoopArm64(this, &s);
+			src = s.src;
+			decoder = s.decoder;
+			vertexType = s.vertexType;
+			vertTypeID = s.vertTypeID;
+			cullMode = s.cullMode;
+			totalVertCount = s.totalVertCount;
+			bytesRead = s.bytesRead;
+			canExtend = s.canExtend;
+			onePassed = s.onePassed;
+			if (s.bail)
+				goto bail;
+			if (src == stall)
+				break;
+		}
+#endif
 		uint32_t data = *src;
 		switch (data >> 24) {
 		case GE_CMD_PRIM:
@@ -1071,14 +1124,15 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 				// Non-indexed draws can be cheaply merged if vertexAddr hasn't changed, that means the vertices
 				// are consecutive in memory. We also ignore culling here.
 				_dbg_assert_((vertexType & GE_VTYPE_IDX_MASK) == GE_VTYPE_IDX_NONE);
-				int commandsExecuted = drawEngineCommon_->ExtendNonIndexedPrim(src, stall, decoder, vertTypeID, clockwise, &bytesRead, isTriangle);
+				int vertsAdded = 0;
+				int commandsExecuted = drawEngineCommon_->ExtendNonIndexedPrim(src, stall, decoder, vertTypeID, clockwise, &bytesRead, &vertsAdded, isTriangle);
 				if (!commandsExecuted) {
 					goto bail;
 				}
 				src += commandsExecuted - 1;
 				gstate_c.vertexAddr += bytesRead;
 				// every PRIM taken, each charged as if run alone
-				totalVertCount += bytesRead / decoder->VertexSize();
+				totalVertCount += vertsAdded;
 				break;
 			}
 
@@ -1208,23 +1262,11 @@ void GPUCommonHW::Execute_Prim(u32 op, u32 diff) {
 			gstate.cmdmem[GE_CMD_TEXLEVEL] = data;
 			break;
 		case GE_CMD_CALL:
-		{
-			// A bone matrix probably. If not we bail. Read where a CALL reads it (one just copied into VRAM is still at its source).
-			const u32 target = g_vramAlias.listAddress(gstate_c.getRelativeAddress(data & 0x00FFFFFC));
-			if (Memory::IsValidRange(target, 13 * 4) &&
-				(Memory::ReadUnchecked_U32(target) >> 24) == GE_CMD_BONEMATRIXDATA &&
-				(Memory::ReadUnchecked_U32(target + 11 * 4) >> 24) == GE_CMD_BONEMATRIXDATA &&
-				(Memory::ReadUnchecked_U32(target + 12 * 4) >> 24) == GE_CMD_RET &&
-				(target > currentList->stall || target + 12 * 4 < currentList->stall) &&
-				(gstate.boneMatrixNumber & 0x00FFFFFF) <= 96 - 12) {
-				drawEngineCommon_->FlushSkin();
-				canExtend = false;
-				FastLoadBoneMatrix(target);
-			} else {
+			// A bone matrix probably. If not we bail.
+			if (!PrimLoopBoneCall(data))
 				goto bail;
-			}
+			canExtend = false;
 			break;
-		}
 
 		// Keep going if these commands don't change state.
 		case GE_CMD_TEXBUFWIDTH0:
