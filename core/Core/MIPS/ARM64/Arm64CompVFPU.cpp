@@ -719,12 +719,22 @@ namespace MIPSComp {
 					SetJumpTarget(skip);
 					break;
 				}
-				case 6:  // vsge
-					DISABLE;  // pending testing
+				case 6:  // vsge: 1.0 if s >= t, else 0.0
+				case 7:  // vslt: 1.0 if s < t, else 0.0
+				{
+					// As Int_Vsge and Int_Vslt: a lane whose s or t swizzle reads past the vector (and isn't a constant) is 0.0
+					// (RetainInvalidSwizzleST), and a NaN gives 0.0: an unordered compare sets neither GE nor MI.
+					const u32 swizzleS = (js.prefixS >> (i * 2)) & 3, swizzleT = (js.prefixT >> (i * 2)) & 3;
+					const bool constS = ((js.prefixS >> (12 + i)) & 1) != 0, constT = ((js.prefixT >> (12 + i)) & 1) != 0;
+					if (((int)swizzleS >= n && !constS) || ((int)swizzleT >= n && !constT)) {
+						fp.MOVI2F(fpr.V(tempregs[i]), 0.0f, SCRATCH1);
+						break;
+					}
+					fp.FCMP(fpr.V(sregs[i]), fpr.V(tregs[i]));
+					CSET(SCRATCH1, ((op >> 23) & 7) == 6 ? CC_GE : CC_MI);
+					fp.UCVTF(fpr.V(tempregs[i]), SCRATCH1);
 					break;
-				case 7:  // vslt
-					DISABLE;  // pending testing
-					break;
+				}
 				}
 				break;
 
