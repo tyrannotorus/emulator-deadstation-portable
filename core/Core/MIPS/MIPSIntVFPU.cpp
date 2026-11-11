@@ -469,14 +469,11 @@ namespace MIPSInt
 			return sum.f;
 		};
 		if (useAccurateDot) {
-			// Deadstation Portable: each column of T against S's rows four dots at once (VfpuDot.h, bit for bit the reference's).
+			// Deadstation Portable: each column of T against S's rows four dots at once (VfpuDot.h, bit for bit the reference's),
+			// straight into D's column: accurate() changes none of them (finish() gives no denormal, a NaN is already 0x7f800001).
 			// The S and T prefixes go on the last dot alone (below): the others are the unprefixed rows' and columns', as here.
-			for (int a = 0; a < n; a++) {
-				float out[4];
-				vfpudot::dot4(s, &t[a * 4], out);
-				for (int b = 0; b < n; b++)
-					d[a * 4 + b] = accurate(out[b]);
-			}
+			for (int a = 0; a < n; a++)
+				vfpudot::dot4(s, &t[a * 4], &d[a * 4]);
 			if (currentMIPS->vfpuCtrl[VFPU_CTRL_SPREFIX] != 0xE4 || currentMIPS->vfpuCtrl[VFPU_CTRL_TPREFIX] != 0xE4) {
 				ApplySwizzleS(&s[(n - 1) * 4], V_Quad);
 				ApplySwizzleT(&t[(n - 1) * 4], V_Quad);

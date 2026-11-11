@@ -172,6 +172,29 @@ inline float neon(const float a[4], const float b[4]) {
 	return finish(vaddvq_s32(signedMants), max_exp);
 }
 
+// finish() for four sums at once, each lane its arithmetic: the sign; nothing left or no exponent, 0.0; over 24 bits, rounded to
+// nearest (ties to even) at the last bit the shift drops; normalized to 24 bits (a negative shift is a right shift); an exponent
+// of 255 or more, infinity; 0 or less, 0.0.
+inline void finish4(int32x4_t sum, int32x4_t maxExp, float out[4]) {
+	const uint32x4_t sign = vandq_u32(vreinterpretq_u32_s32(sum), vdupq_n_u32(0x80000000));
+	uint32x4_t m = vshrq_n_u32(vreinterpretq_u32_s32(vabsq_s32(sum)), EXTRA_BITS);
+	uint32x4_t zero = vorrq_u32(vceqzq_u32(m), vclezq_s32(maxExp));
+	const int32x4_t firstShift = vsubq_s32(vreinterpretq_s32_u32(vclzq_u32(m)), vdupq_n_s32(8));
+	const uint32x4_t roundBit = vshlq_u32(vdupq_n_u32(1), vsubq_s32(vnegq_s32(firstShift), vdupq_n_s32(1)));
+	const uint32x4_t others = vorrq_u32(vshlq_n_u32(roundBit, 1), vsubq_u32(roundBit, vdupq_n_u32(1)));
+	const uint32x4_t roundUp = vandq_u32(vcltzq_s32(firstShift), vandq_u32(vtstq_u32(m, roundBit), vtstq_u32(m, others)));
+	m = vaddq_u32(m, vandq_u32(roundUp, roundBit));
+	const int32x4_t shift = vsubq_s32(vreinterpretq_s32_u32(vclzq_u32(m)), vdupq_n_s32(8));
+	m = vshlq_u32(m, shift);
+	int32x4_t exp = vsubq_s32(maxExp, shift);
+	const uint32x4_t inf = vcgeq_s32(exp, vdupq_n_s32(255));
+	zero = vorrq_u32(zero, vclezq_s32(exp));
+	exp = vminq_s32(exp, vdupq_n_s32(255));
+	m = vbicq_u32(m, inf);
+	const uint32x4_t bits = vorrq_u32(sign, vorrq_u32(vshlq_n_u32(vreinterpretq_u32_s32(exp), 23), vandq_u32(m, vdupq_n_u32(0x007FFFFF))));
+	vst1q_f32(out, vreinterpretq_f32_u32(vbicq_u32(bits, zero)));
+}
+
 // Four dots sharing b: out[r] = dot(rows + 4r, b), r 0 to 3 (vmmul: one column of T against S's rows). A lane each, so each
 // lane is the reference's arithmetic for its row with nothing across lanes; its sign, rounding and exponent the scalar
 // tail's. Any input of exponent 255 or product of 255 or more in any lane: the reference for all four.
@@ -212,10 +235,7 @@ inline void neon4(const float rows[16], const float b[4], float out[4]) {
 		const int32x4_t magnitude = vreinterpretq_s32_u32(vbicq_u32(vshlq_u32(mants[k], vnegq_s32(shift)), gone));
 		sum = vaddq_s32(sum, vbslq_s32(negative[k], vnegq_s32(magnitude), magnitude));
 	}
-	out[0] = finish(vgetq_lane_s32(sum, 0), vgetq_lane_s32(maxExp, 0));
-	out[1] = finish(vgetq_lane_s32(sum, 1), vgetq_lane_s32(maxExp, 1));
-	out[2] = finish(vgetq_lane_s32(sum, 2), vgetq_lane_s32(maxExp, 2));
-	out[3] = finish(vgetq_lane_s32(sum, 3), vgetq_lane_s32(maxExp, 3));
+	finish4(sum, maxExp, out);
 }
 #endif
 
