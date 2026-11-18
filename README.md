@@ -6,7 +6,6 @@ A performance-focused PSP emulator supporting local multiplayer and downloadable
 <img width="960" height="720" alt="sc_20261109_082322" src="https://github.com/user-attachments/assets/f8b59e53-77ba-401b-ad9b-2f451665250c" />
 
 # Features
-## Emulator
 - Many games play well or close to full speed on the TrimUI Brick/Hammer.
 - USB-C / Bluetooth device-to-device co-op play.
 - In-app Recomp store for game mods
