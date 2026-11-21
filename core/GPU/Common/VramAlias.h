@@ -5,8 +5,13 @@
 // is left in VRAM at the list's end is really copied, as the game may look at it then. Anything else that reads VRAM copies first.
 // The GE's thread only.
 #pragma once
+#include "ppsspp_config.h"
 #include "Common/CommonTypes.h"
 #include "Core/MemMap.h"
+
+#if PPSSPP_ARCH(ARM64_NEON)
+#include <arm_neon.h>
+#endif
 
 #include <cstring>
 #include <vector>
@@ -24,6 +29,10 @@ public:
 		if (memo_ < notes_.size() && overlaps(notes_[memo_], dst, size))
 			memo_ = NO_MEMO;
 		notes_.push_back({ dst, src, size });
+		if (dst < lo_)
+			lo_ = dst;
+		if (dst + size > hi_)
+			hi_ = dst + size;
 	}
 
 	// Where a display list at addr runs from: a list that has just been transferred runs from where it came, and copying it is saved.
@@ -32,10 +41,8 @@ public:
 		if (notes_.empty() || !Memory::IsVRAMAddress(addr))
 			return addr;
 		const u32 a = addr & 0x3FFFFFFF;
-		for (size_t i = notes_.size(); i-- > 0; )
-			if (a >= notes_[i].dst && a < notes_[i].dst + notes_[i].size)
-				return notes_[i].src + (a - notes_[i].dst);
-		return addr;
+		const ptrdiff_t i = newestHolding(a);
+		return i < 0 ? addr : notes_[i].src + (a - notes_[i].dst);
 	}
 
 	// where a read of [addr, addr + size) should go: Plain, VRAM as it is, nothing noted touches it; Source, *out in RAM; Conflict, only
@@ -45,6 +52,9 @@ public:
 		addr &= 0x3FFFFFFF;
 		if ((addr & 0x00600000) != 0)
 			return Read::Conflict;	// a VRAM mirror
+		// past every note's end or before every start: none overlaps it (overlaps() needs addr < an end, addr + size > a start)
+		if (addr >= hi_ || addr + size <= lo_)
+			return Read::Plain;
 		if (memo_ < notes_.size())
 		{
 			const Note& n = notes_[memo_];
@@ -116,6 +126,8 @@ public:
 		}
 		notes_.clear();
 		memo_ = NO_MEMO;
+		lo_ = 0xFFFFFFFF;
+		hi_ = 0;
 	}
 
 	// Where to read [addr, addr + size) from, whatever is noted: God of War's vertices come through VRAM too, most of the 1.5 MB
@@ -140,13 +152,12 @@ public:
 			return;
 		addr &= 0x3FFFFFFF;
 		u32 lo = 0, hi = 0;
-		for (size_t i = notes_.size(); i-- > 0; )
-			if (addr >= notes_[i].dst && addr < notes_[i].dst + notes_[i].size)
-			{
-				lo = notes_[i].dst;
-				hi = lo + notes_[i].size;
-				break;
-			}
+		const ptrdiff_t newest = newestHolding(addr);
+		if (newest >= 0)
+		{
+			lo = notes_[newest].dst;
+			hi = lo + notes_[newest].size;
+		}
 		if (hi == 0)
 			return;
 		size_t kept = 0;
@@ -168,6 +179,31 @@ private:
 
 	static bool overlaps(const Note& n, u32 addr, u32 size) { return addr < n.dst + n.size && addr + size > n.dst; }
 
+	// The newest note with dst <= a < dst + size (u32 sums, as everywhere here), or -1. None can hold an a outside [lo_, hi_).
+	// Four notes at a time where NEON is: the same two compares a note, the newest of a group's hits.
+	ptrdiff_t newestHolding(u32 a) const
+	{
+		if (a < lo_ || a >= hi_)
+			return -1;
+		size_t i = notes_.size();
+#if PPSSPP_ARCH(ARM64_NEON)
+		static_assert(sizeof(Note) == 12, "notes as three words");
+		const uint32x4_t va = vdupq_n_u32(a);
+		for (; i >= 4; i -= 4)
+		{
+			const uint32x4x3_t n = vld3q_u32(&notes_[i - 4].dst);	// dst, src, size of four notes
+			const uint32x4_t hit = vandq_u32(vcgeq_u32(va, n.val[0]), vcltq_u32(va, vaddq_u32(n.val[0], n.val[2])));
+			const uint64_t bits = vget_lane_u64(vreinterpret_u64_u16(vmovn_u32(hit)), 0);
+			if (bits)
+				return (ptrdiff_t)(i - 4) + (63 - __builtin_clzll(bits)) / 16;
+		}
+#endif
+		while (i-- > 0)
+			if (a >= notes_[i].dst && a < notes_[i].dst + notes_[i].size)
+				return (ptrdiff_t)i;
+		return -1;
+	}
+
 	static void copyPart(const Note& n, u32 at, u32 size)
 	{
 		memcpy(Memory::GetPointerWriteUnchecked(at), Memory::GetPointerUnchecked(n.src + (at - n.dst)), size);
@@ -176,6 +212,9 @@ private:
 	std::vector<Note> notes_;
 	std::vector<Span> covered_;	// sorted, none touching
 	mutable size_t memo_ = NO_MEMO;
+	// every note's dst at or above lo_, every dst + size at or below hi_ (kept until the notes are cleared: a note dropped by
+	// materializeIfVRAM leaves them wider than they need be, never narrower)
+	u32 lo_ = 0xFFFFFFFF, hi_ = 0;
 };
 
 extern VramAlias g_vramAlias;
