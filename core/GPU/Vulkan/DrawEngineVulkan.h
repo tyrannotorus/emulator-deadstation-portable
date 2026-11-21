@@ -167,13 +167,9 @@ private:
 	NO_INLINE void ResetAfterDraw();
 	// Deadstation Portable: projected textures (DrawEngineVulkan.cpp)
 	bool projectedCullable() const;
-	int cullProjected(int indexCount);
+	bool projectedCullFootprint(int &indexCount, ScissorRect &box);
 	bool projPositionsInSource() const;
 	bool projFromSource_ = false;
-	bool projectedFootprint(int indexCount, ScissorRect &box);
-	float projPos_[65536 * 3];
-	float projUvq_[65536 * 3];
-	int projVerts_ = 0;
 
 	Draw::DrawContext *draw_;
 

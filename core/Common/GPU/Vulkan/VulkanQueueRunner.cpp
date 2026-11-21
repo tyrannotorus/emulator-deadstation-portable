@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <mutex>
 #include <unordered_map>
 
 #include "Common/GPU/DataFormat.h"
@@ -384,6 +385,8 @@ void VulkanQueueRunner::RunSteps(std::vector<VKRStep *> &steps, int curFrame, Fr
 	// them as we go - and easier to debug because we can look backwards in the frame.
 	if (!keepSteps) {
 		for (auto step : steps) {
+			if (step->stepType == VKRStepType::RENDER || step->stepType == VKRStepType::RENDER_SKIP)
+				RecycleStepCommands(step->render.framebuffer, std::move(step->commands));
 			delete step;
 		}
 		steps.clear();
@@ -2105,4 +2108,29 @@ const char *VKRRenderCommandToString(VKRRenderCommand cmd) {
 	} else {
 		return "N/A";
 	}
+}
+
+namespace {
+std::mutex stepCommandsMutex;
+std::unordered_map<VKRFramebuffer *, FastVec<VkRenderData>> stepCommands;
+}
+
+void RecycleStepCommands(VKRFramebuffer *fb, FastVec<VkRenderData> &&commands) {
+	if (commands.capacity() < 64)
+		return;
+	commands.clear();
+	std::lock_guard<std::mutex> lock(stepCommandsMutex);
+	FastVec<VkRenderData> &kept = stepCommands[fb];
+	if (commands.capacity() > kept.capacity())
+		kept = std::move(commands);
+}
+
+FastVec<VkRenderData> TakeStepCommands(VKRFramebuffer *fb) {
+	std::lock_guard<std::mutex> lock(stepCommandsMutex);
+	auto it = stepCommands.find(fb);
+	if (it == stepCommands.end())
+		return FastVec<VkRenderData>();
+	FastVec<VkRenderData> commands = std::move(it->second);
+	stepCommands.erase(it);
+	return commands;
 }

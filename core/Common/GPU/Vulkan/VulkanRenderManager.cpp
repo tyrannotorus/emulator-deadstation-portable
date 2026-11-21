@@ -1006,6 +1006,7 @@ void VulkanRenderManager::BindFramebufferAsRenderTarget(VKRFramebuffer *fb, VKRR
 	}
 
 	VKRStep *step = new VKRStep{ VKRStepType::RENDER };
+	step->commands = TakeStepCommands(fb);
 	step->render.framebuffer = fb;
 	step->render.colorLoad = colorLoad;
 	step->render.depthLoad = depthLoad;

@@ -203,6 +203,13 @@ struct VKRStep {
 	};
 };
 
+// Deadstation Portable: a render step's command list is kept from one frame to the next, for the next step that draws to the
+// same framebuffer: VulkanQueueRunner gives them back as it deletes steps (render thread), VulkanRenderManager takes them as it
+// makes render steps (the GE's thread). Each list grew again from 16 commands every frame, copied at every doubling (God of
+// War's scene, ~4000 commands: 2.3% of its GE thread in reallocations, more in malloc).
+void RecycleStepCommands(VKRFramebuffer *fb, FastVec<VkRenderData> &&commands);
+FastVec<VkRenderData> TakeStepCommands(VKRFramebuffer *fb);
+
 // These are enqueued from the main thread,
 // and the render thread pops them off
 struct VKRRenderThreadTask {

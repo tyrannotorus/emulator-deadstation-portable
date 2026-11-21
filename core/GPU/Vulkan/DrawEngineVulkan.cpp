@@ -270,16 +270,86 @@ bool DrawEngineVulkan::projPositionsInSource() const {
 	return true;
 }
 
-// The triangles of decIndex_ (indices into decoded_) that read more than the edge; returns the indices left.
-int DrawEngineVulkan::cullProjected(int indexCount) {
+namespace {
+struct ProjCorner { float c[4]; float u, v, q; };
+}
+
+// The pixels of one triangle that read more than the clamped edges, as the GPU places them: clipped to the s and t ranges and to
+// w > 0, its corners projected, the box grown to them. False when it can't say (too many corners).
+static bool ProjectedTriangleBox(const ProjCorner corners[3], bool clampS, bool clampT, float sLo, float sHi, float tLo, float tHi,
+	const VkViewport &vp, float &minX, float &minY, float &maxX, float &maxY) {
+	typedef ProjCorner V;
+	V poly[12], next[12];
+	int n = 3;
+	memcpy(poly, corners, sizeof(V) * 3);
+	// the planes, as linear functions of a corner: kept where >= 0
+	for (int plane = 0; plane < 5 && n > 0; plane++) {
+		if ((plane < 2 && !clampS) || (plane >= 2 && plane < 4 && !clampT))
+			continue;
+		auto f = [&](const V &a) {
+			switch (plane) {
+			case 0: return a.u - sLo * a.q;
+			case 1: return sHi * a.q - a.u;
+			case 2: return a.v - tLo * a.q;
+			case 3: return tHi * a.q - a.v;
+			default: return a.c[3] - 1e-5f;
+			}
+		};
+		int m = 0;
+		for (int k = 0; k < n; k++) {
+			const V &a = poly[k], &b = poly[(k + 1) % n];
+			const float fa = f(a), fb = f(b);
+			if (fa >= 0.0f)
+				next[m++] = a;
+			if ((fa >= 0.0f) != (fb >= 0.0f)) {
+				const float t = fa / (fa - fb);
+				V x;
+				for (int r = 0; r < 4; r++)
+					x.c[r] = a.c[r] + (b.c[r] - a.c[r]) * t;
+				x.u = a.u + (b.u - a.u) * t;
+				x.v = a.v + (b.v - a.v) * t;
+				x.q = a.q + (b.q - a.q) * t;
+				next[m++] = x;
+			}
+			if (m >= 11)
+				return false;
+		}
+		memcpy(poly, next, sizeof(V) * m);
+		n = m;
+	}
+	for (int k = 0; k < n; k++) {
+		const float x = vp.x + (poly[k].c[0] / poly[k].c[3] + 1.0f) * 0.5f * vp.width;
+		const float y = vp.y + (poly[k].c[1] / poly[k].c[3] + 1.0f) * 0.5f * vp.height;
+		minX = std::min(minX, x);
+		maxX = std::max(maxX, x);
+		minY = std::min(minY, y);
+		maxY = std::max(maxY, y);
+	}
+	return true;
+}
+
+// Deadstation Portable: a texture projected by the texture matrix from the model-space position, clamped in s or t (see
+// projectedCullable): in one pass over the vertices and one over the triangles, the triangles whose every pixel reads only the
+// texture's edge are dropped from decIndex_ (indexCount becomes what's left), and box is the screen box of the pixels of the
+// rest that read more, as the GPU places them (the uploaded u_mvp and the draw's viewport). Returns false when it can't say
+// where those are (a corner behind the projector): the triangles left are drawn without the box. The same operations as the two
+// passes it replaces (cullProjected, then projectedFootprint, each in clang's order): the same triangles, the same box.
+bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box) {
 	const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
+	const UB_VS_FS_Base &ub = shaderManager_->BaseUniforms();
+	const VkViewport &vp = dynState_.viewport;
 	const float sLo = 0.5f / (float)gstate.getTextureWidth(0), sHi = 1.0f - sLo;
 	const float tLo = 0.5f / (float)gstate.getTextureHeight(0), tHi = 1.0f - tLo;
 	const bool clampS = gstate.isTexCoordClampedS(), clampT = gstate.isTexCoordClampedT();
-	// per vertex: which edges it is past (bit 0 s low, 1 s high, 2 t low, 3 t high), 0 if q <= 0
+	// per vertex: the edges it is past for the cull (bit 0 s low, 1 s high, 2 t low, 3 t high; 0 if q <= 0), and for the box the
+	// planes it is outside (bits 0-3 the clamped s and t ranges, 4 w <= 0, 32 q <= 0), its texture coordinates, clip and screen
+	// positions
 	static u8 past[65536];
+	static u8 outside[65536];
+	static float uvqs[65536][3];
+	static float clip[65536][4];
+	static float screen[65536][2];
 	const int verts = std::min(numDecodedVerts_, 65536);
-	projVerts_ = verts;
 	// The positions, in runs: the decoded vertices (decoded_), or the game's own float positions where Flush decoded straight into
 	// the GPU's buffer (projFromSource_: the same bytes the decoder copies), a run per deferred draw
 	struct Run { const u8 *src; int stride; int start; int count; };
@@ -295,16 +365,23 @@ int DrawEngineVulkan::cullProjected(int indexCount) {
 		runs[numRuns++] = { decoded_ + fmt.posoff, (int)fmt.stride, 0, verts };
 	}
 #if PPSSPP_ARCH(ARM64_NEON)
-	// Four vertices at a time, in the same operations and order as Vec3ByMatrix43 and the tests below (no fused multiply-adds:
-	// the same bits as the scalar loop): u = (m0 x + m3 y) + (m6 z + m9), likewise v and q.
-	const float *m = gstate.tgenMatrix;
-	const float32x4_t m0 = vdupq_n_f32(m[0]), m1 = vdupq_n_f32(m[1]), m2 = vdupq_n_f32(m[2]);
-	const float32x4_t m3 = vdupq_n_f32(m[3]), m4 = vdupq_n_f32(m[4]), m5 = vdupq_n_f32(m[5]);
-	const float32x4_t m6 = vdupq_n_f32(m[6]), m7 = vdupq_n_f32(m[7]), m8 = vdupq_n_f32(m[8]);
-	const float32x4_t m9 = vdupq_n_f32(m[9]), m10 = vdupq_n_f32(m[10]), m11 = vdupq_n_f32(m[11]);
+	// the texture matrix as Vec3ByMatrix43 applies it (fmul, fadd: u = (m0 x + m3 y) + (m6 z + m9)), the cull's tests unfused;
+	// the clip position fused (c = fma(m8, z, fma(m0, x, m4 y)) + m12), the box's plane tests fused (fmsub / fnmsub, turned
+	// round), the screen position fma(size, (c / w + 1) * 0.5, origin): clang's operations for the scalar passes
+	const float *tm = gstate.tgenMatrix;
+	const float32x4_t t0m = vdupq_n_f32(tm[0]), t1m = vdupq_n_f32(tm[1]), t2m = vdupq_n_f32(tm[2]);
+	const float32x4_t t3m = vdupq_n_f32(tm[3]), t4m = vdupq_n_f32(tm[4]), t5m = vdupq_n_f32(tm[5]);
+	const float32x4_t t6m = vdupq_n_f32(tm[6]), t7m = vdupq_n_f32(tm[7]), t8m = vdupq_n_f32(tm[8]);
+	const float32x4_t t9m = vdupq_n_f32(tm[9]), t10m = vdupq_n_f32(tm[10]), t11m = vdupq_n_f32(tm[11]);
+	float32x4_t m[16];
+	for (int k = 0; k < 16; k++)
+		m[k] = vdupq_n_f32(ub.mvp[k]);
 	const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
-	const uint32x4_t bitS = vdupq_n_u32(clampS ? 1 : 0), bitS2 = vdupq_n_u32(clampS ? 2 : 0);
-	const uint32x4_t bitT = vdupq_n_u32(clampT ? 4 : 0), bitT2 = vdupq_n_u32(clampT ? 8 : 0);
+	const uint32x4_t b1 = vdupq_n_u32(clampS ? 1 : 0), b2 = vdupq_n_u32(clampS ? 2 : 0);
+	const uint32x4_t b4 = vdupq_n_u32(clampT ? 4 : 0), b8 = vdupq_n_u32(clampT ? 8 : 0);
+	const uint32x4_t b16 = vdupq_n_u32(16), b32 = vdupq_n_u32(32);
+	const float32x4_t zero = vdupq_n_f32(0.0f), wMin = vdupq_n_f32(1e-5f), one = vdupq_n_f32(1.0f), half = vdupq_n_f32(0.5f);
+	const float32x4_t ox = vdupq_n_f32(vp.x), oy = vdupq_n_f32(vp.y), sw = vdupq_n_f32(vp.width), sh = vdupq_n_f32(vp.height);
 #endif
 	for (int r = 0; r < numRuns; r++) {
 		const u8 *src = runs[r].src;
@@ -316,150 +393,111 @@ int DrawEngineVulkan::cullProjected(int indexCount) {
 		// each load takes 16 bytes from a position: the run's last vertex is left to the scalar loop, so no load reads past the run
 		for (; k + 4 < count; k += 4) {
 			const int i = start + k;
-			// x y z (and the next float, unused) of each, then columns
 			const float32x4_t r0 = vld1q_f32((const float *)(src + (k + 0) * stride));
 			const float32x4_t r1 = vld1q_f32((const float *)(src + (k + 1) * stride));
 			const float32x4_t r2 = vld1q_f32((const float *)(src + (k + 2) * stride));
 			const float32x4_t r3 = vld1q_f32((const float *)(src + (k + 3) * stride));
-			const float32x4_t t0 = vtrn1q_f32(r0, r1), t1 = vtrn2q_f32(r0, r1), t2 = vtrn1q_f32(r2, r3), t3 = vtrn2q_f32(r2, r3);
-			float32x4x3_t pos;
-			pos.val[0] = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(t0), vreinterpretq_f64_f32(t2)));
-			pos.val[1] = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(t1), vreinterpretq_f64_f32(t3)));
-			pos.val[2] = vreinterpretq_f32_f64(vzip2q_f64(vreinterpretq_f64_f32(t0), vreinterpretq_f64_f32(t2)));
-			const float32x4_t x = pos.val[0], y = pos.val[1], z = pos.val[2];
+			const float32x4_t q0 = vtrn1q_f32(r0, r1), q1 = vtrn2q_f32(r0, r1), q2 = vtrn1q_f32(r2, r3), q3 = vtrn2q_f32(r2, r3);
+			const float32x4_t x = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(q0), vreinterpretq_f64_f32(q2)));
+			const float32x4_t y = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(q1), vreinterpretq_f64_f32(q3)));
+			const float32x4_t z = vreinterpretq_f32_f64(vzip2q_f64(vreinterpretq_f64_f32(q0), vreinterpretq_f64_f32(q2)));
 			float32x4x3_t uvq;
-			uvq.val[0] = vaddq_f32(vaddq_f32(vmulq_f32(m0, x), vmulq_f32(m3, y)), vaddq_f32(vmulq_f32(m6, z), m9));
-			uvq.val[1] = vaddq_f32(vaddq_f32(vmulq_f32(m1, x), vmulq_f32(m4, y)), vaddq_f32(vmulq_f32(m7, z), m10));
-			uvq.val[2] = vaddq_f32(vaddq_f32(vmulq_f32(m2, x), vmulq_f32(m5, y)), vaddq_f32(vmulq_f32(m8, z), m11));
-			vst3q_f32(projUvq_ + i * 3, uvq);
-			vst3q_f32(projPos_ + i * 3, pos);
+			uvq.val[0] = vaddq_f32(vaddq_f32(vmulq_f32(t0m, x), vmulq_f32(t3m, y)), vaddq_f32(vmulq_f32(t6m, z), t9m));
+			uvq.val[1] = vaddq_f32(vaddq_f32(vmulq_f32(t1m, x), vmulq_f32(t4m, y)), vaddq_f32(vmulq_f32(t7m, z), t10m));
+			uvq.val[2] = vaddq_f32(vaddq_f32(vmulq_f32(t2m, x), vmulq_f32(t5m, y)), vaddq_f32(vmulq_f32(t8m, z), t11m));
+			vst3q_f32(uvqs[i], uvq);
 			const float32x4_t u = uvq.val[0], v = uvq.val[1], q = uvq.val[2];
-			uint32x4_t bits = vandq_u32(vcltq_f32(u, vmulq_f32(vsLo, q)), bitS);
-			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(u, vmulq_f32(vsHi, q)), bitS2));
-			bits = vorrq_u32(bits, vandq_u32(vcltq_f32(v, vmulq_f32(vtLo, q)), bitT));
-			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(v, vmulq_f32(vtHi, q)), bitT2));
-			bits = vandq_u32(bits, vcgtq_f32(q, vdupq_n_f32(0.0f)));
-			const uint8x8_t narrow = vmovn_u16(vcombine_u16(vmovn_u32(bits), vdup_n_u16(0)));
-			memcpy(past + i, &narrow, 4);
-		}
-#endif
-		for (; k < count; k++) {
-			const int i = start + k;
-			const float *pos = (const float *)(src + k * stride);
-			float *uvq = projUvq_ + i * 3;
-			Vec3ByMatrix43(uvq, pos, gstate.tgenMatrix);
-			memcpy(projPos_ + i * 3, pos, 12);
-			u8 bits = 0;
-			if (uvq[2] > 0.0f) {
-				if (clampS) {
-					bits |= uvq[0] < sLo * uvq[2] ? 1 : 0;
-					bits |= uvq[0] > sHi * uvq[2] ? 2 : 0;
-				}
-				if (clampT) {
-					bits |= uvq[1] < tLo * uvq[2] ? 4 : 0;
-					bits |= uvq[1] > tHi * uvq[2] ? 8 : 0;
-				}
-			}
-			past[i] = bits;
-		}
-	}
-	int kept = 0;
-	for (int i = 0; i + 2 < indexCount; i += 3) {
-		const u16 a = decIndex_[i], b = decIndex_[i + 1], c = decIndex_[i + 2];
-		if (a >= verts || b >= verts || c >= verts || (past[a] & past[b] & past[c]) == 0) {
-			decIndex_[kept++] = a;
-			decIndex_[kept++] = b;
-			decIndex_[kept++] = c;
-		}
-	}
-	return kept;
-}
-
-// The screen box of the pixels of the kept triangles that read more than the texture's edge (cullProjected), as the GPU
-// places them (the uploaded u_mvp and the draw's viewport): each triangle clipped to q > 0 and the clamped s and t ranges,
-// and to w > 0 (the GPU's own clip), its corners projected. False when it can't say (a corner behind the projector).
-bool DrawEngineVulkan::projectedFootprint(int indexCount, ScissorRect &box) {
-	const UB_VS_FS_Base &ub = shaderManager_->BaseUniforms();
-	const VkViewport &vp = dynState_.viewport;
-	const float sLo = 0.5f / (float)gstate.getTextureWidth(0), sHi = 1.0f - sLo;
-	const float tLo = 0.5f / (float)gstate.getTextureHeight(0), tHi = 1.0f - tLo;
-	const bool clampS = gstate.isTexCoordClampedS(), clampT = gstate.isTexCoordClampedT();
-	struct V { float c[4]; float u, v, q; };
-	// each vertex once: its clip position, its screen position, and the planes it is outside (bits 0-3 the clamped s and t
-	// ranges, 4 w <= 0; 32: behind the projector, q <= 0)
-	static float clip[65536][4];
-	static float screen[65536][2];
-	static u8 outside[65536];
-	const int verts = projVerts_;
-	int i = 0;
-#if PPSSPP_ARCH(ARM64_NEON)
-	// Four vertices at a time, in the operations clang gave the scalar loop below (its disassembly): c = fma(m8, z, fma(m0, x,
-	// m4 y)) + m12, the edge tests fused (fmsub / fnmsub: the same values, negated where the test is turned round), the screen
-	// position fma(size, (c / w + 1) * 0.5, origin). The same bits, and ~4x fewer instructions (~12% of God of War's GE thread).
-	{
-		float32x4_t m[16];
-		for (int k = 0; k < 16; k++)
-			m[k] = vdupq_n_f32(ub.mvp[k]);
-		const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
-		const uint32x4_t b1 = vdupq_n_u32(clampS ? 1 : 0), b2 = vdupq_n_u32(clampS ? 2 : 0);
-		const uint32x4_t b4 = vdupq_n_u32(clampT ? 4 : 0), b8 = vdupq_n_u32(clampT ? 8 : 0);
-		const uint32x4_t b16 = vdupq_n_u32(16), b32 = vdupq_n_u32(32);
-		const float32x4_t zero = vdupq_n_f32(0.0f), wMin = vdupq_n_f32(1e-5f), one = vdupq_n_f32(1.0f), half = vdupq_n_f32(0.5f);
-		const float32x4_t ox = vdupq_n_f32(vp.x), oy = vdupq_n_f32(vp.y), sw = vdupq_n_f32(vp.width), sh = vdupq_n_f32(vp.height);
-		for (; i + 4 <= verts; i += 4) {
-			const float32x4x3_t p = vld3q_f32(projPos_ + i * 3);
-			const float32x4x3_t t = vld3q_f32(projUvq_ + i * 3);
+			// the cull's edges
+			uint32x4_t pb = vandq_u32(vcltq_f32(u, vmulq_f32(vsLo, q)), b1);
+			pb = vorrq_u32(pb, vandq_u32(vcgtq_f32(u, vmulq_f32(vsHi, q)), b2));
+			pb = vorrq_u32(pb, vandq_u32(vcltq_f32(v, vmulq_f32(vtLo, q)), b4));
+			pb = vorrq_u32(pb, vandq_u32(vcgtq_f32(v, vmulq_f32(vtHi, q)), b8));
+			pb = vandq_u32(pb, vcgtq_f32(q, zero));
+			const uint8x8_t pn = vmovn_u16(vcombine_u16(vmovn_u32(pb), vdup_n_u16(0)));
+			memcpy(past + i, &pn, 4);
+			// the box's planes
 			float32x4x4_t c;
-			for (int r = 0; r < 4; r++)
-				c.val[r] = vaddq_f32(vfmaq_f32(vfmaq_f32(vmulq_f32(m[4 + r], p.val[1]), m[r], p.val[0]), m[8 + r], p.val[2]), m[12 + r]);
+			for (int row = 0; row < 4; row++)
+				c.val[row] = vaddq_f32(vfmaq_f32(vfmaq_f32(vmulq_f32(m[4 + row], y), m[row], x), m[8 + row], z), m[12 + row]);
 			vst4q_f32(clip[i], c);
-			const float32x4_t u = t.val[0], v = t.val[1], q = t.val[2];
-			uint32x4_t bits = vandq_u32(vcltq_f32(vfmsq_f32(u, vsLo, q), zero), b1);
-			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(vfmsq_f32(u, vsHi, q), zero), b2));
-			bits = vorrq_u32(bits, vandq_u32(vcltq_f32(vfmsq_f32(v, vtLo, q), zero), b4));
-			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(vfmsq_f32(v, vtHi, q), zero), b8));
-			bits = vorrq_u32(bits, vandq_u32(vcltq_f32(c.val[3], wMin), b16));
-			bits = vorrq_u32(bits, vandq_u32(vcleq_f32(q, zero), b32));
-			const uint8x8_t narrow = vmovn_u16(vcombine_u16(vmovn_u32(bits), vdup_n_u16(0)));
-			vst1_lane_u32((uint32_t *)(outside + i), vreinterpret_u32_u8(narrow), 0);
+			uint32x4_t ob = vandq_u32(vcltq_f32(vfmsq_f32(u, vsLo, q), zero), b1);
+			ob = vorrq_u32(ob, vandq_u32(vcgtq_f32(vfmsq_f32(u, vsHi, q), zero), b2));
+			ob = vorrq_u32(ob, vandq_u32(vcltq_f32(vfmsq_f32(v, vtLo, q), zero), b4));
+			ob = vorrq_u32(ob, vandq_u32(vcgtq_f32(vfmsq_f32(v, vtHi, q), zero), b8));
+			ob = vorrq_u32(ob, vandq_u32(vcltq_f32(c.val[3], wMin), b16));
+			ob = vorrq_u32(ob, vandq_u32(vcleq_f32(q, zero), b32));
+			const uint8x8_t on = vmovn_u16(vcombine_u16(vmovn_u32(ob), vdup_n_u16(0)));
+			memcpy(outside + i, &on, 4);
 			// the screen position (read only where w > 1e-5: the other lanes' values are never used)
 			float32x4x2_t xy;
 			xy.val[0] = vfmaq_f32(ox, sw, vmulq_f32(vaddq_f32(vdivq_f32(c.val[0], c.val[3]), one), half));
 			xy.val[1] = vfmaq_f32(oy, sh, vmulq_f32(vaddq_f32(vdivq_f32(c.val[1], c.val[3]), one), half));
 			vst2q_f32(screen[i], xy);
 		}
-	}
 #endif
-	for (; i < verts; i++) {
-		const float *p = projPos_ + i * 3, *t = projUvq_ + i * 3;
-		float *c = clip[i];
-		for (int r = 0; r < 4; r++)
-			c[r] = ub.mvp[r] * p[0] + ub.mvp[4 + r] * p[1] + ub.mvp[8 + r] * p[2] + ub.mvp[12 + r];
-		u8 bits = 0;
-		if (clampS) {
-			bits |= t[0] - sLo * t[2] < 0.0f ? 1 : 0;
-			bits |= sHi * t[2] - t[0] < 0.0f ? 2 : 0;
-		}
-		if (clampT) {
-			bits |= t[1] - tLo * t[2] < 0.0f ? 4 : 0;
-			bits |= tHi * t[2] - t[1] < 0.0f ? 8 : 0;
-		}
-		bits |= c[3] - 1e-5f < 0.0f ? 16 : 0;
-		bits |= t[2] <= 0.0f ? 32 : 0;
-		outside[i] = bits;
-		if ((bits & 16) == 0) {
-			screen[i][0] = vp.x + (c[0] / c[3] + 1.0f) * 0.5f * vp.width;
-			screen[i][1] = vp.y + (c[1] / c[3] + 1.0f) * 0.5f * vp.height;
+		for (; k < count; k++) {
+			const int i = start + k;
+			const float *p = (const float *)(src + k * stride);
+			float *t = uvqs[i];
+			Vec3ByMatrix43(t, p, gstate.tgenMatrix);
+			u8 pb = 0;
+			if (t[2] > 0.0f) {
+				if (clampS) {
+					pb |= t[0] < sLo * t[2] ? 1 : 0;
+					pb |= t[0] > sHi * t[2] ? 2 : 0;
+				}
+				if (clampT) {
+					pb |= t[1] < tLo * t[2] ? 4 : 0;
+					pb |= t[1] > tHi * t[2] ? 8 : 0;
+				}
+			}
+			past[i] = pb;
+			float *c = clip[i];
+			for (int row = 0; row < 4; row++)
+				c[row] = fmaf(ub.mvp[8 + row], p[2], fmaf(ub.mvp[row], p[0], ub.mvp[4 + row] * p[1])) + ub.mvp[12 + row];
+			u8 ob = 0;
+			if (clampS) {
+				ob |= fmaf(-sLo, t[2], t[0]) < 0.0f ? 1 : 0;
+				ob |= fmaf(sHi, t[2], -t[0]) < 0.0f ? 2 : 0;
+			}
+			if (clampT) {
+				ob |= fmaf(-tLo, t[2], t[1]) < 0.0f ? 4 : 0;
+				ob |= fmaf(tHi, t[2], -t[1]) < 0.0f ? 8 : 0;
+			}
+			ob |= c[3] < 1e-5f ? 16 : 0;
+			ob |= t[2] <= 0.0f ? 32 : 0;
+			outside[i] = ob;
+			if ((ob & 16) == 0) {
+				screen[i][0] = fmaf(vp.width, (c[0] / c[3] + 1.0f) * 0.5f, vp.x);
+				screen[i][1] = fmaf(vp.height, (c[1] / c[3] + 1.0f) * 0.5f, vp.y);
+			}
 		}
 	}
+	// the triangles: dropped when all three corners are past one edge; the rest kept, and their pixels that read more boxed
+	bool sayable = true;
 	float minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f;
+	int kept = 0;
 	for (int i = 0; i + 2 < indexCount; i += 3) {
 		const u16 ia = decIndex_[i], ib = decIndex_[i + 1], ic = decIndex_[i + 2];
-		if (ia >= verts || ib >= verts || ic >= verts)
-			return false;
+		if (ia >= verts || ib >= verts || ic >= verts) {
+			decIndex_[kept++] = ia;
+			decIndex_[kept++] = ib;
+			decIndex_[kept++] = ic;
+			sayable = false;
+			continue;
+		}
+		if ((past[ia] & past[ib] & past[ic]) != 0)
+			continue;
+		decIndex_[kept++] = ia;
+		decIndex_[kept++] = ib;
+		decIndex_[kept++] = ic;
+		if (!sayable)
+			continue;
 		const u8 oa = outside[ia], ob = outside[ib], oc = outside[ic];
-		if ((oa | ob | oc) & 32)
-			return false;
+		if ((oa | ob | oc) & 32) {
+			sayable = false;
+			continue;
+		}
 		// inside every plane: its corners as they are; all outside one plane: no pixels
 		if ((oa | ob | oc) == 0) {
 			for (const u16 idx : { ia, ib, ic }) {
@@ -472,60 +510,20 @@ bool DrawEngineVulkan::projectedFootprint(int indexCount, ScissorRect &box) {
 		}
 		if (oa & ob & oc)
 			continue;
-		V poly[12], next[12];
-		int n = 3;
+		ProjCorner corners[3];
 		const u16 corner[3] = { ia, ib, ic };
 		for (int k = 0; k < 3; k++) {
-			const float *t = projUvq_ + corner[k] * 3;
-			memcpy(poly[k].c, clip[corner[k]], sizeof(poly[k].c));
-			poly[k].u = t[0];
-			poly[k].v = t[1];
-			poly[k].q = t[2];
+			memcpy(corners[k].c, clip[corner[k]], sizeof(corners[k].c));
+			corners[k].u = uvqs[corner[k]][0];
+			corners[k].v = uvqs[corner[k]][1];
+			corners[k].q = uvqs[corner[k]][2];
 		}
-		// the planes, as linear functions of a corner: kept where >= 0
-		for (int plane = 0; plane < 5 && n > 0; plane++) {
-			if ((plane < 2 && !clampS) || (plane >= 2 && plane < 4 && !clampT))
-				continue;
-			auto f = [&](const V &a) {
-				switch (plane) {
-				case 0: return a.u - sLo * a.q;
-				case 1: return sHi * a.q - a.u;
-				case 2: return a.v - tLo * a.q;
-				case 3: return tHi * a.q - a.v;
-				default: return a.c[3] - 1e-5f;
-				}
-			};
-			int m = 0;
-			for (int k = 0; k < n; k++) {
-				const V &a = poly[k], &b = poly[(k + 1) % n];
-				const float fa = f(a), fb = f(b);
-				if (fa >= 0.0f)
-					next[m++] = a;
-				if ((fa >= 0.0f) != (fb >= 0.0f)) {
-					const float t = fa / (fa - fb);
-					V x;
-					for (int r = 0; r < 4; r++)
-						x.c[r] = a.c[r] + (b.c[r] - a.c[r]) * t;
-					x.u = a.u + (b.u - a.u) * t;
-					x.v = a.v + (b.v - a.v) * t;
-					x.q = a.q + (b.q - a.q) * t;
-					next[m++] = x;
-				}
-				if (m >= 11)
-					return false;
-			}
-			memcpy(poly, next, sizeof(V) * m);
-			n = m;
-		}
-		for (int k = 0; k < n; k++) {
-			const float x = vp.x + (poly[k].c[0] / poly[k].c[3] + 1.0f) * 0.5f * vp.width;
-			const float y = vp.y + (poly[k].c[1] / poly[k].c[3] + 1.0f) * 0.5f * vp.height;
-			minX = std::min(minX, x);
-			maxX = std::max(maxX, x);
-			minY = std::min(minY, y);
-			maxY = std::max(maxY, y);
-		}
+		if (!ProjectedTriangleBox(corners, clampS, clampT, sLo, sHi, tLo, tHi, vp, minX, minY, maxX, maxY))
+			sayable = false;
 	}
+	indexCount = kept;
+	if (!sayable)
+		return false;
 	const ScissorRect &cur = dynState_.scissor;
 	int x1 = std::max((int)cur.x, (int)floorf(minX) - 2), y1 = std::max((int)cur.y, (int)floorf(minY) - 2);
 	int x2 = std::min((int)cur.x + (int)cur.width, (int)ceilf(maxX) + 2), y2 = std::min((int)cur.y + (int)cur.height, (int)ceilf(maxY) + 2);
@@ -656,7 +654,7 @@ void DrawEngineVulkan::Flush() {
 
 		VkBuffer vbuf = VK_NULL_HANDLE;
 		// Projected texture, clamped: triangles whose every pixel reads only the texture's edge culled, the rest drawn
-		// within the screen box of what reads more (cullProjected, projectedFootprint). Decoded where the CPU reads back fast.
+		// within the screen box of what reads more (projectedCullFootprint). Decoded where the CPU reads back fast.
 		const bool projCull = projectedCullable();
 		projFromSource_ = false;
 		if (applySkinInDecode_ && (lastVType_ & GE_VTYPE_WEIGHT_MASK)) {
@@ -685,8 +683,6 @@ void DrawEngineVulkan::Flush() {
 		int maxIndex;
 		bool useElements;
 		DecodeIndsAndGetData(&prim, &vertexCount, &maxIndex, &useElements, false);
-		if (projCull && useElements && prim == GE_PRIM_TRIANGLES)
-			vertexCount = cullProjected(vertexCount);
 
 		bool hasColor = (lastVType_ & GE_VTYPE_COL_MASK) != GE_VTYPE_COL_NONE;
 		if (gstate.isModeThrough()) {
@@ -786,7 +782,7 @@ void DrawEngineVulkan::Flush() {
 		bool footprint = false;
 		if (projCull && useElements && prim == GE_PRIM_TRIANGLES && vertexCount > 0) {
 			ScissorRect box;
-			footprint = projectedFootprint(vertexCount, box);
+			footprint = projectedCullFootprint(vertexCount, box);
 			if (footprint && box.width == 0)
 				vertexCount = 0;
 			else if (footprint)
