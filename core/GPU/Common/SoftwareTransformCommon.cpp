@@ -612,6 +612,70 @@ bool SoftwareTransform::ExpandRectangles(int vertexCount, int &numDecodedVerts, 
 
 	bool pixelMapped = false && !gstate_c.textureIsVideo;
 
+#if PPSSPP_ARCH(ARM64_NEON)
+	// Deadstation Portable: each corner written from registers, the two vertices each loaded once: x y as a pair of words (the
+	// corner's own), z w (8 bytes), u v (the corner's products: one u * uscale and one v * vscale per vertex, as below), and
+	// uv_w fog color0 color1 (16 bytes): what the copies-then-fields below write, word for word, copied words moved, never
+	// computed. The UV swap (RotateUVThrough's or RotateUV's) is decided first from the same comparisons of the same values (it
+	// reads only the corners' x and y) and made by exchanging the two corners' u v stores. clang's code for the copies loaded the
+	// bottom right again for each corner and read its own stores back for the swap (it can't know trans doesn't alias
+	// transformed): 99 instructions and 55 loads and stores a rectangle.
+	static_assert(sizeof(TransformedVertex) == 40 && offsetof(TransformedVertex, z) == 8 && offsetof(TransformedVertex, u) == 16 &&
+		offsetof(TransformedVertex, uv_w) == 24 && offsetof(TransformedVertex, color0_32) == 32, "the corners' layout");
+	{
+		// RotateUV multiplies both y's by -1 when flipped, which makes its test RotateUVThrough's: the same outcome for any two
+		// floats (negation is exact, and a NaN is unordered either way)
+		const bool yFlipped = throughmode || params_.flippedY;
+		for (int i = 0; i < vertexCount; i += 2) {
+			const TransformedVertex &tl = transformed[indsIn[i + 0]];
+			const TransformedVertex &br = transformed[indsIn[i + 1]];
+			const float brx = br.x, bry = br.y, tlx = tl.x, tly = tl.y;
+			const float32x2_t zw = vld1_f32(&br.z);
+			const float32x4_t tail = vld1q_f32(&br.uv_w);  // uv_w fog color0 color1
+			const float bru = br.u * uscale, brv = br.v * vscale, tlu = tl.u * uscale, tlv = tl.v * vscale;
+			const bool xLess = tlx < brx, xMore = tlx > brx, yLess = tly < bry, yMore = tly > bry;
+			const bool swap = yFlipped ? ((xLess & yMore) | (xMore & yLess)) : ((xLess & yLess) | (xMore & yMore));
+			float *out = (float *)trans;
+			// bottom right, top right (x of the bottom right, y of the top left), top left, bottom left
+			out[0] = brx;
+			out[1] = bry;
+			vst1_f32(out + 2, zw);
+			out[4] = bru;
+			out[5] = brv;
+			vst1q_f32(out + 6, tail);
+			out[10] = brx;
+			out[11] = tly;
+			vst1_f32(out + 12, zw);
+			vst1q_f32(out + 16, tail);
+			out[20] = tlx;
+			out[21] = tly;
+			vst1_f32(out + 22, zw);
+			out[24] = tlu;
+			out[25] = tlv;
+			vst1q_f32(out + 26, tail);
+			out[30] = tlx;
+			out[31] = bry;
+			vst1_f32(out + 32, zw);
+			vst1q_f32(out + 36, tail);
+			// the top right's u v (the bottom right's u, the top left's v) and the bottom left's, exchanged when swapped
+			float *uvTR = out + (swap ? 34 : 14), *uvBL = out + (swap ? 14 : 34);
+			uvTR[0] = bru;
+			uvTR[1] = tlv;
+			uvBL[0] = tlu;
+			uvBL[1] = brv;
+			// Triangle: BR-TR-TL, then BL-BR-TL
+			indsOut[0] = i * 2 + 0;
+			indsOut[1] = i * 2 + 1;
+			indsOut[2] = i * 2 + 2;
+			indsOut[3] = i * 2 + 3;
+			indsOut[4] = i * 2 + 0;
+			indsOut[5] = i * 2 + 2;
+			trans += 4;
+			indsOut += 6;
+		}
+		numTrans = 6 * (vertexCount / 2);
+	}
+#else
 	for (int i = 0; i < vertexCount; i += 2) {
 		const TransformedVertex &transVtxTL = transformed[indsIn[i + 0]];
 		const TransformedVertex &transVtxBR = transformed[indsIn[i + 1]];
@@ -677,6 +741,7 @@ bool SoftwareTransform::ExpandRectangles(int vertexCount, int &numDecodedVerts, 
 
 		numTrans += 6;
 	}
+#endif
 	inds = newInds;
 	*pixelMappedExactly = pixelMapped;
 	return true;
