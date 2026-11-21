@@ -238,7 +238,26 @@ void TextureCacheVulkan::UpdateCurrentClut(GEPaletteFormat clutFormat, u32 clutB
 	// Adding clutBaseBytes may just be mitigating this for some usage patterns.
 	const u32 clutExtendedBytes = std::min(clutTotalBytes_ + clutBaseBytes, clutMaxBytes_);
 
-	clutHash_ = XXH3_64bits((const char *)clutBufRaw_, clutExtendedBytes) & 0xFFFFFFFF;
+	// the hash of the same bytes is the same: a palette that was hashed lately, byte for byte, takes that hash
+	const HashedClut *same = nullptr;
+	for (const HashedClut &h : hashedCluts_) {
+		if (h.bytes == clutExtendedBytes && memcmp(h.data, clutBufRaw_, clutExtendedBytes) == 0) {
+			same = &h;
+			break;
+		}
+	}
+	if (same) {
+		clutHash_ = same->hash;
+	} else {
+		clutHash_ = XXH3_64bits((const char *)clutBufRaw_, clutExtendedBytes) & 0xFFFFFFFF;
+		if (clutExtendedBytes <= sizeof(hashedCluts_[0].data)) {
+			HashedClut &h = hashedCluts_[nextHashedClut_];
+			nextHashedClut_ = (nextHashedClut_ + 1) & 3;
+			h.bytes = clutExtendedBytes;
+			h.hash = clutHash_;
+			memcpy(h.data, clutBufRaw_, clutExtendedBytes);
+		}
+	}
 	clutBuf_ = clutBufRaw_;
 
 	// Special optimization: fonts typically draw clut4 with just alpha values in a single color.

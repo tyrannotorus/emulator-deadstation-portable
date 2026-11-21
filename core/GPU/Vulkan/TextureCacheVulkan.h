@@ -97,6 +97,16 @@ private:
 
 	SamplerCache samplerCache_;
 
+	// Deadstation Portable: the last palettes hashed, their bytes kept: a palette loaded again (the WipEouts load 250-390 a vblank)
+	// has the same XXH3 hash, which a compare of its bytes answers for a fraction of the hashing
+	struct HashedClut {
+		u32 bytes = 0xFFFFFFFF;  // none yet
+		u32 hash = 0;
+		u8 data[2048];
+	};
+	HashedClut hashedCluts_[4];
+	int nextHashedClut_ = 0;
+
 	DrawEngineVulkan *drawEngine_;
 
 
