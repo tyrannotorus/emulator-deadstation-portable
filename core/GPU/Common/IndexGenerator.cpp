@@ -65,7 +65,10 @@ void IndexGenerator::AddList(int numVerts, int indexOffset, bool clockwise) {
 	inds_ = outInds;
 }
 
-alignas(16) static const u16 offsets_clockwise[24] = {
+// Deadstation Portable: both windings in one table, a row each, so AddStrip loads one row (clang had loaded both tables and
+// blended them with a mask for every chunk of eight indices).
+alignas(16) static const u16 offsetsByWind[2][24] = {
+	{
 	0, (u16)(0 + 1), (u16)(0 + 2),
 	(u16)(1 + 1), 1, (u16)(1 + 2),
 	2, (u16)(2 + 1), (u16)(2 + 2),
@@ -74,9 +77,8 @@ alignas(16) static const u16 offsets_clockwise[24] = {
 	(u16)(5 + 1), 5, (u16)(5 + 2),
 	6, (u16)(6 + 1), (u16)(6 + 2),
 	(u16)(7 + 1), 7, (u16)(7 + 2),
-};
-
-alignas(16) static const uint16_t offsets_counter_clockwise[24] = {
+	},
+	{
 	0, (u16)(0 + 2), (u16)(0 + 1),
 	1, (u16)(1 + 1), (u16)(1 + 2),
 	2, (u16)(2 + 2), (u16)(2 + 1),
@@ -85,6 +87,7 @@ alignas(16) static const uint16_t offsets_counter_clockwise[24] = {
 	5, (u16)(5 + 1), (u16)(5 + 2),
 	6, (u16)(6 + 2), (u16)(6 + 1),
 	7, (u16)(7 + 1), (u16)(7 + 2),
+	},
 };
 
 void IndexGenerator::AddStrip(int numVerts, int indexOffset, bool clockwise) {
@@ -93,7 +96,10 @@ void IndexGenerator::AddStrip(int numVerts, int indexOffset, bool clockwise) {
 		return;
 	}
 	uint16x8_t ibase8 = vdupq_n_u16(indexOffset);
-	const u16 *offsets = clockwise ? offsets_clockwise : offsets_counter_clockwise;
+	// the row by its index, hidden from the compiler: a select of the two rows is what it had turned into loads of both
+	int row = clockwise ? 0 : 1;
+	__asm__("" : "+r"(row));
+	const u16 *offsets = offsetsByWind[row];
 	u16 *dst = inds_;
 	uint16x8_t offsets0 = vaddq_u16(ibase8, vld1q_u16(offsets));
 	vst1q_u16(dst, offsets0);
