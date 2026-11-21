@@ -942,12 +942,16 @@ void VulkanRenderManager::BindFramebufferAsRenderTarget(VKRFramebuffer *fb, VKRR
 			curRenderStep_ = steps_.back();
 			curStepHasViewport_ = false;
 			curStepHasScissor_ = false;
+			// Deadstation Portable: done once both are found (near the step's start): a rebind mid-pass walked every command
+			// of the pass so far, thousands in God of War's scene, at each of its rebinds.
 			for (const auto &c : steps_.back()->commands) {
 				if (c.cmd == VKRRenderCommand::VIEWPORT) {
 					curStepHasViewport_ = true;
 				} else if (c.cmd == VKRRenderCommand::SCISSOR) {
 					curStepHasScissor_ = true;
 				}
+				if (curStepHasViewport_ && curStepHasScissor_)
+					break;
 			}
 			if (clearMask != 0) {
 				VkRenderData data{ VKRRenderCommand::CLEAR };

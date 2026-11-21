@@ -268,7 +268,51 @@ int DrawEngineVulkan::cullProjected(int indexCount) {
 	static u8 past[65536];
 	const int verts = std::min(numDecodedVerts_, 65536);
 	projVerts_ = verts;
-	for (int i = 0; i < verts; i++) {
+	int i = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+	// Four vertices at a time, in the same operations and order as Vec3ByMatrix43 and the tests below (no fused multiply-adds:
+	// the same bits as the scalar loop): u = (m0 x + m3 y) + (m6 z + m9), likewise v and q.
+	{
+		const float *m = gstate.tgenMatrix;
+		const float32x4_t m0 = vdupq_n_f32(m[0]), m1 = vdupq_n_f32(m[1]), m2 = vdupq_n_f32(m[2]);
+		const float32x4_t m3 = vdupq_n_f32(m[3]), m4 = vdupq_n_f32(m[4]), m5 = vdupq_n_f32(m[5]);
+		const float32x4_t m6 = vdupq_n_f32(m[6]), m7 = vdupq_n_f32(m[7]), m8 = vdupq_n_f32(m[8]);
+		const float32x4_t m9 = vdupq_n_f32(m[9]), m10 = vdupq_n_f32(m[10]), m11 = vdupq_n_f32(m[11]);
+		const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
+		const uint32x4_t bitS = vdupq_n_u32(clampS ? 1 : 0), bitS2 = vdupq_n_u32(clampS ? 2 : 0);
+		const uint32x4_t bitT = vdupq_n_u32(clampT ? 4 : 0), bitT2 = vdupq_n_u32(clampT ? 8 : 0);
+		const int stride = fmt.stride;
+		const u8 *src = decoded_ + fmt.posoff;
+		for (; i + 4 <= verts; i += 4) {
+			// x y z (and the next float, unused) of each, then columns
+			const float32x4_t r0 = vld1q_f32((const float *)(src + (i + 0) * stride));
+			const float32x4_t r1 = vld1q_f32((const float *)(src + (i + 1) * stride));
+			const float32x4_t r2 = vld1q_f32((const float *)(src + (i + 2) * stride));
+			const float32x4_t r3 = vld1q_f32((const float *)(src + (i + 3) * stride));
+			const float32x4_t t0 = vtrn1q_f32(r0, r1), t1 = vtrn2q_f32(r0, r1), t2 = vtrn1q_f32(r2, r3), t3 = vtrn2q_f32(r2, r3);
+			float32x4x3_t pos;
+			pos.val[0] = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(t0), vreinterpretq_f64_f32(t2)));
+			pos.val[1] = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(t1), vreinterpretq_f64_f32(t3)));
+			pos.val[2] = vreinterpretq_f32_f64(vzip2q_f64(vreinterpretq_f64_f32(t0), vreinterpretq_f64_f32(t2)));
+			const float32x4_t x = pos.val[0], y = pos.val[1], z = pos.val[2];
+			float32x4x3_t uvq;
+			uvq.val[0] = vaddq_f32(vaddq_f32(vmulq_f32(m0, x), vmulq_f32(m3, y)), vaddq_f32(vmulq_f32(m6, z), m9));
+			uvq.val[1] = vaddq_f32(vaddq_f32(vmulq_f32(m1, x), vmulq_f32(m4, y)), vaddq_f32(vmulq_f32(m7, z), m10));
+			uvq.val[2] = vaddq_f32(vaddq_f32(vmulq_f32(m2, x), vmulq_f32(m5, y)), vaddq_f32(vmulq_f32(m8, z), m11));
+			vst3q_f32(projUvq_ + i * 3, uvq);
+			vst3q_f32(projPos_ + i * 3, pos);
+			const float32x4_t u = uvq.val[0], v = uvq.val[1], q = uvq.val[2];
+			uint32x4_t bits = vandq_u32(vcltq_f32(u, vmulq_f32(vsLo, q)), bitS);
+			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(u, vmulq_f32(vsHi, q)), bitS2));
+			bits = vorrq_u32(bits, vandq_u32(vcltq_f32(v, vmulq_f32(vtLo, q)), bitT));
+			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(v, vmulq_f32(vtHi, q)), bitT2));
+			bits = vandq_u32(bits, vcgtq_f32(q, vdupq_n_f32(0.0f)));
+			const uint8x8_t narrow = vmovn_u16(vcombine_u16(vmovn_u32(bits), vdup_n_u16(0)));
+			vst1_lane_u32((uint32_t *)(past + i), vreinterpret_u32_u8(narrow), 0);
+		}
+	}
+#endif
+	for (; i < verts; i++) {
 		const float *pos = (const float *)(decoded_ + i * fmt.stride + fmt.posoff);
 		float *uvq = projUvq_ + i * 3;
 		Vec3ByMatrix43(uvq, pos, gstate.tgenMatrix);
@@ -314,7 +358,46 @@ bool DrawEngineVulkan::projectedFootprint(int indexCount, ScissorRect &box) {
 	static float screen[65536][2];
 	static u8 outside[65536];
 	const int verts = projVerts_;
-	for (int i = 0; i < verts; i++) {
+	int i = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+	// Four vertices at a time, in the operations clang gave the scalar loop below (its disassembly): c = fma(m8, z, fma(m0, x,
+	// m4 y)) + m12, the edge tests fused (fmsub / fnmsub: the same values, negated where the test is turned round), the screen
+	// position fma(size, (c / w + 1) * 0.5, origin). The same bits, and ~4x fewer instructions (~12% of God of War's GE thread).
+	{
+		float32x4_t m[16];
+		for (int k = 0; k < 16; k++)
+			m[k] = vdupq_n_f32(ub.mvp[k]);
+		const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
+		const uint32x4_t b1 = vdupq_n_u32(clampS ? 1 : 0), b2 = vdupq_n_u32(clampS ? 2 : 0);
+		const uint32x4_t b4 = vdupq_n_u32(clampT ? 4 : 0), b8 = vdupq_n_u32(clampT ? 8 : 0);
+		const uint32x4_t b16 = vdupq_n_u32(16), b32 = vdupq_n_u32(32);
+		const float32x4_t zero = vdupq_n_f32(0.0f), wMin = vdupq_n_f32(1e-5f), one = vdupq_n_f32(1.0f), half = vdupq_n_f32(0.5f);
+		const float32x4_t ox = vdupq_n_f32(vp.x), oy = vdupq_n_f32(vp.y), sw = vdupq_n_f32(vp.width), sh = vdupq_n_f32(vp.height);
+		for (; i + 4 <= verts; i += 4) {
+			const float32x4x3_t p = vld3q_f32(projPos_ + i * 3);
+			const float32x4x3_t t = vld3q_f32(projUvq_ + i * 3);
+			float32x4x4_t c;
+			for (int r = 0; r < 4; r++)
+				c.val[r] = vaddq_f32(vfmaq_f32(vfmaq_f32(vmulq_f32(m[4 + r], p.val[1]), m[r], p.val[0]), m[8 + r], p.val[2]), m[12 + r]);
+			vst4q_f32(clip[i], c);
+			const float32x4_t u = t.val[0], v = t.val[1], q = t.val[2];
+			uint32x4_t bits = vandq_u32(vcltq_f32(vfmsq_f32(u, vsLo, q), zero), b1);
+			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(vfmsq_f32(u, vsHi, q), zero), b2));
+			bits = vorrq_u32(bits, vandq_u32(vcltq_f32(vfmsq_f32(v, vtLo, q), zero), b4));
+			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(vfmsq_f32(v, vtHi, q), zero), b8));
+			bits = vorrq_u32(bits, vandq_u32(vcltq_f32(c.val[3], wMin), b16));
+			bits = vorrq_u32(bits, vandq_u32(vcleq_f32(q, zero), b32));
+			const uint8x8_t narrow = vmovn_u16(vcombine_u16(vmovn_u32(bits), vdup_n_u16(0)));
+			vst1_lane_u32((uint32_t *)(outside + i), vreinterpret_u32_u8(narrow), 0);
+			// the screen position (read only where w > 1e-5: the other lanes' values are never used)
+			float32x4x2_t xy;
+			xy.val[0] = vfmaq_f32(ox, sw, vmulq_f32(vaddq_f32(vdivq_f32(c.val[0], c.val[3]), one), half));
+			xy.val[1] = vfmaq_f32(oy, sh, vmulq_f32(vaddq_f32(vdivq_f32(c.val[1], c.val[3]), one), half));
+			vst2q_f32(screen[i], xy);
+		}
+	}
+#endif
+	for (; i < verts; i++) {
 		const float *p = projPos_ + i * 3, *t = projUvq_ + i * 3;
 		float *c = clip[i];
 		for (int r = 0; r < 4; r++)

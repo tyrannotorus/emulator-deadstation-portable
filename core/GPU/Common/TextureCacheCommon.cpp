@@ -1364,6 +1364,10 @@ void TextureCacheCommon::LoadClut(u32 clutAddr, u32 loadBytes) {
 			const uint32_t *source = (const uint32_t *)Memory::GetPointerUnchecked(clutAddr);
 			uint32_t *dest = (uint32_t *)clutBufRaw_;
 			int numBlocks = bytes / 32;
+			// Deadstation Portable: every line asked for before the first is used. The A53 runs in order: each load below waited
+			// for its line in turn (the WipEouts load ~300 palettes a frame, cold: 4-5% of their GE work on this loop).
+			for (u32 off = 0; off < bytes; off += 64)
+				__builtin_prefetch((const u8 *)source + off);
 			for (int i = 0; i < numBlocks; i++, source += 8, dest += 8) {
 				uint32x4_t data1 = vld1q_u32(source);
 				uint32x4_t data2 = vld1q_u32(source + 4);
