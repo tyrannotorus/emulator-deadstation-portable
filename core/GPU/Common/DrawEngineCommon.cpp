@@ -395,25 +395,39 @@ bool DrawEngineCommon::TestBoundingBoxFast(const void *vdata, int vertexCount, c
 	const float32x4_t planeW = vld1q_f32(planes_.w);
 
 	// Visible if, for each plane, some vertex is inside it. Most draws are, and their first few vertices show it (this tests whole draws).
+	// Deadstation Portable: two vertices a step, their chains side by side, one check of the planes each step: the A53 runs in
+	// order, and each vertex's check (across the lanes, to a general register, compared) waited for that vertex's whole chain
+	// before the next vertex could start. The inside lanes only ever gain, so the answer is the same (a draw found visible
+	// after an odd vertex is found so one vertex later).
+	const auto planesInside = [&](const float32x4_t objpos) {
+		const float32x4_t worldpos = vaddq_f32(
+			vmlaq_laneq_f32(
+				vmulq_laneq_f32(worldX, objpos, 0),
+				worldY, objpos, 1),
+			vmlaq_laneq_f32(worldW, worldZ, objpos, 2)
+		);
+		// OK, now we check it against the four planes.
+		// This is really curiously similar to a matrix multiplication (well, it is one).
+		const float32x4_t planeDist = vaddq_f32(
+			vmlaq_laneq_f32(
+				vmulq_laneq_f32(planeX, worldpos, 0),
+				planeY, worldpos, 1),
+			vmlaq_laneq_f32(planeW, planeZ, worldpos, 2)
+		);
+		return vcgezq_f32(planeDist);
+	};
 	const auto anyInside = [&](const auto &position) {
 		uint32x4_t inside = vdupq_n_u32(0);
-		for (int i = 0; i < vertexCount; i++) {
-			const float32x4_t objpos = position(positions + i * stride);
-			const float32x4_t worldpos = vaddq_f32(
-				vmlaq_laneq_f32(
-					vmulq_laneq_f32(worldX, objpos, 0),
-					worldY, objpos, 1),
-				vmlaq_laneq_f32(worldW, worldZ, objpos, 2)
-			);
-			// OK, now we check it against the four planes.
-			// This is really curiously similar to a matrix multiplication (well, it is one).
-			const float32x4_t planeDist = vaddq_f32(
-				vmlaq_laneq_f32(
-					vmulq_laneq_f32(planeX, worldpos, 0),
-					planeY, worldpos, 1),
-				vmlaq_laneq_f32(planeW, planeZ, worldpos, 2)
-			);
-			inside = vorrq_u32(inside, vcgezq_f32(planeDist));
+		int i = 0;
+		for (; i + 1 < vertexCount; i += 2) {
+			const uint32x4_t a = planesInside(position(positions + i * stride));
+			const uint32x4_t b = planesInside(position(positions + (i + 1) * stride));
+			inside = vorrq_u32(inside, vorrq_u32(a, b));
+			if (vminvq_u32(inside) != 0)
+				return true;
+		}
+		if (i < vertexCount) {
+			inside = vorrq_u32(inside, planesInside(position(positions + i * stride)));
 			if (vminvq_u32(inside) != 0)
 				return true;
 		}
