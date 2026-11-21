@@ -16,6 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <cstring>
+#include <type_traits>
 
 #include "ppsspp_config.h"
 
@@ -194,6 +195,34 @@ void IndexGenerator::TranslateLineStrip(int numInds, const ITypeLE *inds, int in
 	inds_ = outInds;
 }
 
+#if PPSSPP_ARCH(ARM64_NEON)
+namespace {
+// Deadstation Portable: a strip's triangles eight at a time from an even one, as TranslateStrip makes them: triangle t's corners
+// (t, t + w, t + 3 - w), w the first wind (1 clockwise, 2 not) for an even t and 3 - it for an odd one. As byte indices into
+// the indices loaded from the first corner: two bytes each for 16-bit indices, one for 8-bit.
+struct StripTables {
+	u8 u16Wind[2][48];
+	u8 u8Wind[2][24];
+};
+constexpr StripTables MakeStripTables() {
+	StripTables tables{};
+	for (int first = 1; first <= 2; first++) {
+		for (int t = 0; t < 8; t++) {
+			const int w = (t & 1) ? 3 - first : first;
+			const int corner[3] = { t, t + w, t + 3 - w };
+			for (int k = 0; k < 3; k++) {
+				tables.u16Wind[first - 1][(t * 3 + k) * 2] = (u8)(corner[k] * 2);
+				tables.u16Wind[first - 1][(t * 3 + k) * 2 + 1] = (u8)(corner[k] * 2 + 1);
+				tables.u8Wind[first - 1][t * 3 + k] = (u8)corner[k];
+			}
+		}
+	}
+	return tables;
+}
+alignas(16) constexpr StripTables stripTables = MakeStripTables();
+}  // namespace
+#endif
+
 template <class ITypeLE>
 void IndexGenerator::TranslateList(int numInds, const ITypeLE *inds, int indexOffset, bool clockwise) {
 	// We only bother doing this minor optimization in triangle list, since it's by far the most
@@ -207,8 +236,48 @@ void IndexGenerator::TranslateList(int numInds, const ITypeLE *inds, int indexOf
 		numInds = numTris * 3;
 		const int v1 = clockwise ? 1 : 2;
 		const int v2 = clockwise ? 2 : 1;
-		// TODO: This can actually be SIMD-d, although will need complex shuffles if clockwise.
-		for (int i = 0; i < numInds; i += 3) {
+		int i = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+		// Deadstation Portable: eight triangles at a time (clockwise as they are, not with corners 1 and 2 exchanged), in 16
+		// bits as the stores below wrap them. The scalar loop's stores could have been changing its next indices for all the
+		// compiler knew, so it ran an index at a time.
+		const uint16x8_t off = vdupq_n_u16((u16)indexOffset);
+		if (std::is_same<ITypeLE, u16_le>::value || std::is_same<ITypeLE, u8>::value) {
+			if (clockwise) {
+				// 24 indices a step: the scalar loop then starts on a triangle
+				for (; i + 24 <= numInds; i += 24, outInds += 24) {
+					for (int k = 0; k < 24; k += 8) {
+						uint16x8_t v;
+						if (std::is_same<ITypeLE, u8>::value)
+							v = vmovl_u8(vld1_u8((const u8 *)(inds + i + k)));
+						else
+							v = vld1q_u16((const u16 *)(inds + i + k));
+						vst1q_u16(outInds + k, vaddq_u16(v, off));
+					}
+				}
+			} else {
+				for (; i + 24 <= numInds; i += 24, outInds += 24) {
+					uint16x8x3_t t;
+					if (std::is_same<ITypeLE, u8>::value) {
+						const uint8x8x3_t b = vld3_u8((const u8 *)(inds + i));
+						t.val[0] = vmovl_u8(b.val[0]);
+						t.val[1] = vmovl_u8(b.val[2]);
+						t.val[2] = vmovl_u8(b.val[1]);
+					} else {
+						const uint16x8x3_t h = vld3q_u16((const u16 *)(inds + i));
+						t.val[0] = h.val[0];
+						t.val[1] = h.val[2];
+						t.val[2] = h.val[1];
+					}
+					t.val[0] = vaddq_u16(t.val[0], off);
+					t.val[1] = vaddq_u16(t.val[1], off);
+					t.val[2] = vaddq_u16(t.val[2], off);
+					vst3q_u16(outInds, t);
+				}
+			}
+		}
+#endif
+		for (; i < numInds; i += 3) {
 			*outInds++ = indexOffset + inds[i];
 			*outInds++ = indexOffset + inds[i + v1];
 			*outInds++ = indexOffset + inds[i + v2];
@@ -222,7 +291,38 @@ void IndexGenerator::TranslateStrip(int numInds, const ITypeLE *inds, int indexO
 	int wind = clockwise ? 1 : 2;
 	int numTris = numInds - 2;
 	u16 *outInds = inds_;
-	for (int i = 0; i < numTris; i++) {
+	int i = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+	// Deadstation Portable: eight triangles at a time (each step starts on an even one, so the wind is the first's), their 24
+	// corners picked from the 16 indices loaded by a table lookup, in 16 bits as the stores below wrap them. Only while all 16 are
+	// the draw's (the 8 triangles need 10).
+	if (std::is_same<ITypeLE, u16_le>::value || std::is_same<ITypeLE, u8>::value) {
+		const uint16x8_t off = vdupq_n_u16((u16)indexOffset);
+		if (std::is_same<ITypeLE, u8>::value) {
+			const u8 *tab = stripTables.u8Wind[wind - 1];
+			const uint8x16_t t0 = vld1q_u8(tab);
+			const uint8x8_t t1 = vld1_u8(tab + 16);
+			for (; i + 16 <= numInds; i += 8, outInds += 24) {
+				const uint8x16_t src = vld1q_u8((const u8 *)(inds + i));
+				const uint8x16_t a = vqtbl1q_u8(src, t0);
+				const uint8x8_t b = vqtbl1_u8(src, t1);
+				vst1q_u16(outInds, vaddq_u16(vmovl_u8(vget_low_u8(a)), off));
+				vst1q_u16(outInds + 8, vaddq_u16(vmovl_high_u8(a), off));
+				vst1q_u16(outInds + 16, vaddq_u16(vmovl_u8(b), off));
+			}
+		} else {
+			const u8 *tab = stripTables.u16Wind[wind - 1];
+			const uint8x16_t t0 = vld1q_u8(tab), t1 = vld1q_u8(tab + 16), t2 = vld1q_u8(tab + 32);
+			for (; i + 16 <= numInds; i += 8, outInds += 24) {
+				const uint8x16x2_t src = { { vld1q_u8((const u8 *)(inds + i)), vld1q_u8((const u8 *)(inds + i + 8)) } };
+				vst1q_u16(outInds, vaddq_u16(vreinterpretq_u16_u8(vqtbl2q_u8(src, t0)), off));
+				vst1q_u16(outInds + 8, vaddq_u16(vreinterpretq_u16_u8(vqtbl2q_u8(src, t1)), off));
+				vst1q_u16(outInds + 16, vaddq_u16(vreinterpretq_u16_u8(vqtbl2q_u8(src, t2)), off));
+			}
+		}
+	}
+#endif
+	for (; i < numTris; i++) {
 		*outInds++ = indexOffset + inds[i];
 		*outInds++ = indexOffset + inds[i + wind];
 		wind ^= 3;  // Toggle between 1 and 2
