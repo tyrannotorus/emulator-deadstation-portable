@@ -168,6 +168,8 @@ private:
 	// Deadstation Portable: projected textures (DrawEngineVulkan.cpp)
 	bool projectedCullable() const;
 	int cullProjected(int indexCount);
+	bool projPositionsInSource() const;
+	bool projFromSource_ = false;
 	bool projectedFootprint(int indexCount, ScissorRect &box);
 	float projPos_[65536 * 3];
 	float projUvq_[65536 * 3];

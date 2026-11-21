@@ -17,6 +17,8 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
 #include <cmath>
 #include <map>
 #include <mutex>
@@ -39,6 +41,7 @@
 #include "Core/FrameTiming.h"
 #include "Core/Core.h"
 #include "Core/System.h"
+#include "Core/ELF/ParamSFO.h"
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/FunctionWrappers.h"
@@ -244,6 +247,15 @@ static int geModeCounted[2] = {};
 static double geModeNextAt = 0.0;
 static double geModeLastFlip = 0.0, geModeLastWait = 0.0;
 static bool geModeChoseLate = false;
+// Each game's choice is remembered (the app cache's <disc id>.gemode: "late" or "exact"): a launch starts in it, and is measured
+// again only after a hold, which doubles (to 5 minutes) each time a measurement agrees. Measuring runs a stretch in the worse mode:
+// from every launch, and every minute, that was ~3 s at its speed (WipEout Pure: 2.3 ms a vblank slower exact).
+static double geModeHold = 60.0;
+static bool geModeLoaded = false;
+static std::string GeModePath() {
+	const std::string disc = g_paramSFO.GetDiscID();
+	return disc.empty() ? std::string() : (GetSysDirectory(DIRECTORY_APP_CACHE) / (disc + ".gemode")).ToString();
+}
 
 static void GeModeSet(bool late) {
 	if (ge::lateEvents == late)
@@ -256,6 +268,22 @@ static void GeModeSet(bool late) {
 static void GeModeMeasure(double now, double wait, double vblanks, bool steady, bool skipped) {
 	if (ge::lateMode >= 0)
 		return;
+	if (!geModeLoaded) {
+		geModeLoaded = true;
+		const std::string path = GeModePath();
+		if (!path.empty()) {
+			if (FILE *f = fopen(path.c_str(), "r")) {
+				char word[16] = {};
+				if (fgets(word, sizeof(word), f) != nullptr && (strncmp(word, "late", 4) == 0 || strncmp(word, "exact", 5) == 0)) {
+					geModeChoseLate = strncmp(word, "late", 4) == 0;
+					fprintf(stderr, "Deadstation Portable: GE interrupts %s, as measured before (%s)\n", geModeChoseLate ? "late" : "exact", path.c_str());
+					GeModeSet(geModeChoseLate);
+					geModeNextAt = now + geModeHold;
+				}
+				fclose(f);
+			}
+		}
+	}
 	const double cost = geModeLastFlip != 0.0 && vblanks > 0.0 ? (now - geModeLastFlip - geModeLastWait) / vblanks : -1.0;
 	const bool counts = cost >= 0.0 && cost < 0.1 && !skipped;
 	geModeLastFlip = now;
@@ -304,11 +332,22 @@ static void GeModeMeasure(double now, double wait, double vblanks, bool steady, 
 		keepLate = true;
 	else if (measured && exact < late - Margin)
 		keepLate = false;
-	NOTICE_LOG(Log::sceDisplay, "GE interrupts %s: %.2f ms a vblank exact, %.2f ms late (%d, %d frames)", keepLate ? "late" : "exact", exact * 1000.0, late * 1000.0, geModeCounted[0], geModeCounted[1]);
+	fprintf(stderr, "Deadstation Portable: GE interrupts %s: %.2f ms a vblank exact, %.2f ms late (%d, %d frames)\n", keepLate ? "late" : "exact", exact * 1000.0, late * 1000.0, geModeCounted[0], geModeCounted[1]);
+	if (keepLate == geModeChoseLate)
+		geModeHold = std::min(geModeHold * 2.0, 300.0);
+	else
+		geModeHold = Hold;
+	const std::string path = GeModePath();
+	if (!path.empty() && (keepLate != geModeChoseLate || geModeHold == Hold * 2.0)) {
+		if (FILE *f = fopen(path.c_str(), "w")) {
+			fputs(keepLate ? "late\n" : "exact\n", f);
+			fclose(f);
+		}
+	}
 	geModeChoseLate = keepLate;
 	GeModeSet(keepLate);
 	geModePhase = 0;
-	geModeNextAt = now + Hold;
+	geModeNextAt = now + geModeHold;
 }
 
 static bool UseAutoFrameSkip() {

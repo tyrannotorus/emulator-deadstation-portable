@@ -258,6 +258,18 @@ bool DrawEngineVulkan::projectedCullable() const {
 		&& gstate_c.submitType != SubmitType::HW_BEZIER && gstate_c.submitType != SubmitType::HW_SPLINE;
 }
 
+// The draw's positions as decoded are the game's own bytes: 32-bit floats (copied as they are), no morph, a decode from the start,
+// none of it in VRAM (God of War rewrites vertices there while its lists run: positions read twice could differ).
+bool DrawEngineVulkan::projPositionsInSource() const {
+	if ((dec_->VertexType() & GE_VTYPE_POS_MASK) != GE_VTYPE_POS_FLOAT || dec_->morphcount != 1 || decodeVertsCounter_ != 0)
+		return false;
+	for (int j = 0; j < numDrawVerts_; j++) {
+		if (Memory::IsVRAMAddress(Memory::GetAddressFromHostPointerUnchecked(drawVerts_[j].verts)))
+			return false;
+	}
+	return true;
+}
+
 // The triangles of decIndex_ (indices into decoded_) that read more than the edge; returns the indices left.
 int DrawEngineVulkan::cullProjected(int indexCount) {
 	const DecVtxFormat &fmt = dec_->GetDecVtxFmt();
@@ -268,27 +280,47 @@ int DrawEngineVulkan::cullProjected(int indexCount) {
 	static u8 past[65536];
 	const int verts = std::min(numDecodedVerts_, 65536);
 	projVerts_ = verts;
-	int i = 0;
+	// The positions, in runs: the decoded vertices (decoded_), or the game's own float positions where Flush decoded straight into
+	// the GPU's buffer (projFromSource_: the same bytes the decoder copies), a run per deferred draw
+	struct Run { const u8 *src; int stride; int start; int count; };
+	Run runs[MAX_DEFERRED_DRAW_VERTS + 1];
+	int numRuns = 0;
+	if (projFromSource_) {
+		for (int j = 0; j < decodeVertsCounter_; j++) {
+			const DeferredVerts &dv = drawVerts_[j];
+			const int start = (int)drawVertexOffsets_[j] + dv.indexLowerBound;
+			runs[numRuns++] = { (const u8 *)dv.verts + dv.indexLowerBound * dec_->VertexSize() + dec_->posoff, dec_->VertexSize(), start, dv.indexUpperBound - dv.indexLowerBound + 1 };
+		}
+	} else {
+		runs[numRuns++] = { decoded_ + fmt.posoff, (int)fmt.stride, 0, verts };
+	}
 #if PPSSPP_ARCH(ARM64_NEON)
 	// Four vertices at a time, in the same operations and order as Vec3ByMatrix43 and the tests below (no fused multiply-adds:
 	// the same bits as the scalar loop): u = (m0 x + m3 y) + (m6 z + m9), likewise v and q.
-	{
-		const float *m = gstate.tgenMatrix;
-		const float32x4_t m0 = vdupq_n_f32(m[0]), m1 = vdupq_n_f32(m[1]), m2 = vdupq_n_f32(m[2]);
-		const float32x4_t m3 = vdupq_n_f32(m[3]), m4 = vdupq_n_f32(m[4]), m5 = vdupq_n_f32(m[5]);
-		const float32x4_t m6 = vdupq_n_f32(m[6]), m7 = vdupq_n_f32(m[7]), m8 = vdupq_n_f32(m[8]);
-		const float32x4_t m9 = vdupq_n_f32(m[9]), m10 = vdupq_n_f32(m[10]), m11 = vdupq_n_f32(m[11]);
-		const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
-		const uint32x4_t bitS = vdupq_n_u32(clampS ? 1 : 0), bitS2 = vdupq_n_u32(clampS ? 2 : 0);
-		const uint32x4_t bitT = vdupq_n_u32(clampT ? 4 : 0), bitT2 = vdupq_n_u32(clampT ? 8 : 0);
-		const int stride = fmt.stride;
-		const u8 *src = decoded_ + fmt.posoff;
-		for (; i + 4 <= verts; i += 4) {
+	const float *m = gstate.tgenMatrix;
+	const float32x4_t m0 = vdupq_n_f32(m[0]), m1 = vdupq_n_f32(m[1]), m2 = vdupq_n_f32(m[2]);
+	const float32x4_t m3 = vdupq_n_f32(m[3]), m4 = vdupq_n_f32(m[4]), m5 = vdupq_n_f32(m[5]);
+	const float32x4_t m6 = vdupq_n_f32(m[6]), m7 = vdupq_n_f32(m[7]), m8 = vdupq_n_f32(m[8]);
+	const float32x4_t m9 = vdupq_n_f32(m[9]), m10 = vdupq_n_f32(m[10]), m11 = vdupq_n_f32(m[11]);
+	const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
+	const uint32x4_t bitS = vdupq_n_u32(clampS ? 1 : 0), bitS2 = vdupq_n_u32(clampS ? 2 : 0);
+	const uint32x4_t bitT = vdupq_n_u32(clampT ? 4 : 0), bitT2 = vdupq_n_u32(clampT ? 8 : 0);
+#endif
+	for (int r = 0; r < numRuns; r++) {
+		const u8 *src = runs[r].src;
+		const int stride = runs[r].stride;
+		const int start = runs[r].start;
+		const int count = std::min(runs[r].count, verts - start);
+		int k = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+		// each load takes 16 bytes from a position: the run's last vertex is left to the scalar loop, so no load reads past the run
+		for (; k + 4 < count; k += 4) {
+			const int i = start + k;
 			// x y z (and the next float, unused) of each, then columns
-			const float32x4_t r0 = vld1q_f32((const float *)(src + (i + 0) * stride));
-			const float32x4_t r1 = vld1q_f32((const float *)(src + (i + 1) * stride));
-			const float32x4_t r2 = vld1q_f32((const float *)(src + (i + 2) * stride));
-			const float32x4_t r3 = vld1q_f32((const float *)(src + (i + 3) * stride));
+			const float32x4_t r0 = vld1q_f32((const float *)(src + (k + 0) * stride));
+			const float32x4_t r1 = vld1q_f32((const float *)(src + (k + 1) * stride));
+			const float32x4_t r2 = vld1q_f32((const float *)(src + (k + 2) * stride));
+			const float32x4_t r3 = vld1q_f32((const float *)(src + (k + 3) * stride));
 			const float32x4_t t0 = vtrn1q_f32(r0, r1), t1 = vtrn2q_f32(r0, r1), t2 = vtrn1q_f32(r2, r3), t3 = vtrn2q_f32(r2, r3);
 			float32x4x3_t pos;
 			pos.val[0] = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(t0), vreinterpretq_f64_f32(t2)));
@@ -308,27 +340,28 @@ int DrawEngineVulkan::cullProjected(int indexCount) {
 			bits = vorrq_u32(bits, vandq_u32(vcgtq_f32(v, vmulq_f32(vtHi, q)), bitT2));
 			bits = vandq_u32(bits, vcgtq_f32(q, vdupq_n_f32(0.0f)));
 			const uint8x8_t narrow = vmovn_u16(vcombine_u16(vmovn_u32(bits), vdup_n_u16(0)));
-			vst1_lane_u32((uint32_t *)(past + i), vreinterpret_u32_u8(narrow), 0);
+			memcpy(past + i, &narrow, 4);
 		}
-	}
 #endif
-	for (; i < verts; i++) {
-		const float *pos = (const float *)(decoded_ + i * fmt.stride + fmt.posoff);
-		float *uvq = projUvq_ + i * 3;
-		Vec3ByMatrix43(uvq, pos, gstate.tgenMatrix);
-		memcpy(projPos_ + i * 3, pos, 12);
-		u8 bits = 0;
-		if (uvq[2] > 0.0f) {
-			if (clampS) {
-				bits |= uvq[0] < sLo * uvq[2] ? 1 : 0;
-				bits |= uvq[0] > sHi * uvq[2] ? 2 : 0;
+		for (; k < count; k++) {
+			const int i = start + k;
+			const float *pos = (const float *)(src + k * stride);
+			float *uvq = projUvq_ + i * 3;
+			Vec3ByMatrix43(uvq, pos, gstate.tgenMatrix);
+			memcpy(projPos_ + i * 3, pos, 12);
+			u8 bits = 0;
+			if (uvq[2] > 0.0f) {
+				if (clampS) {
+					bits |= uvq[0] < sLo * uvq[2] ? 1 : 0;
+					bits |= uvq[0] > sHi * uvq[2] ? 2 : 0;
+				}
+				if (clampT) {
+					bits |= uvq[1] < tLo * uvq[2] ? 4 : 0;
+					bits |= uvq[1] > tHi * uvq[2] ? 8 : 0;
+				}
 			}
-			if (clampT) {
-				bits |= uvq[1] < tLo * uvq[2] ? 4 : 0;
-				bits |= uvq[1] > tHi * uvq[2] ? 8 : 0;
-			}
+			past[i] = bits;
 		}
-		past[i] = bits;
 	}
 	int kept = 0;
 	for (int i = 0; i + 2 < indexCount; i += 3) {
@@ -625,6 +658,7 @@ void DrawEngineVulkan::Flush() {
 		// Projected texture, clamped: triangles whose every pixel reads only the texture's edge culled, the rest drawn
 		// within the screen box of what reads more (cullProjected, projectedFootprint). Decoded where the CPU reads back fast.
 		const bool projCull = projectedCullable();
+		projFromSource_ = false;
 		if (applySkinInDecode_ && (lastVType_ & GE_VTYPE_WEIGHT_MASK)) {
 			// If software skinning, we're predecoding into "decoded". So make sure we're done, then push that content.
 			DecodeVerts(dec_, decoded_);
@@ -636,7 +670,10 @@ void DrawEngineVulkan::Flush() {
 			int vertsToDecode = ComputeNumVertsToDecode();
 			// Decode directly into the pushbuffer
 			u8 *dest = pushVertex_->Allocate(vertsToDecode * dec_->GetDecVtxFmt().stride, 4, &vbuf, &vbOffset);
-			if (projCull) {
+			// Deadstation Portable: float positions are copied by the decoder as they are, so the cull can read the game's own: decoded
+			// straight into the GPU's buffer then, no copy (God of War: ~860 KB a vblank, ~4% of its GE thread)
+			projFromSource_ = projCull && projPositionsInSource();
+			if (projCull && !projFromSource_) {
 				DecodeVerts(dec_, decoded_);
 				memcpy(dest, decoded_, numDecodedVerts_ * dec_->GetDecVtxFmt().stride);
 			} else {
