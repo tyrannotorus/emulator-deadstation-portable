@@ -173,6 +173,9 @@ struct TexCacheEntry {
 	u8 maxLevel;
 	u16 dim;
 	u16 bufw;
+	// Deadstation Portable: the smallest alpha any of its texels has (255: full; 0: unknown), from its decode
+	// (TextureCacheCommon::decodeMinAlpha_): an alpha test every texel passes needs no discard (IsAlphaTestTriviallyTrue)
+	u8 minAlpha = 0;
 	union {
 		GLRTexture *textureName;
 		void *texturePtr;
@@ -402,6 +405,10 @@ protected:
 	virtual void BindAsClutTexture(Draw::Texture *tex, bool smooth) {}
 
 	CheckAlphaResult DecodeTextureLevel(u8 *out, int outPitch, GETextureFormat format, GEPaletteFormat clutformat, uint32_t texaddr, int level, int bufw, TexDecodeFlags flags);
+	// Deadstation Portable: the last DecodeTextureLevel's smallest texel alpha when it returned CHECKALPHA_ANY (0: unknown); found
+	// for indexed textures with 32-bit palettes, from the palette entries their texels use
+	u8 decodeMinAlpha_ = 0;
+	static u8 UsedClutMinAlpha32(const u8 *texptr, int rowBytes, int w, int h, bool nibbles, const u32 *clut);
 	static void UnswizzleFromMem(u32 *dest, u32 destPitch, const u8 *texptr, u32 bufw, u32 height, u32 bytesPerPixel);
 	CheckAlphaResult ReadIndexedTex(u8 *out, int outPitch, int level, const u8 *texptr, int bytesPerIndex, int bufw, bool reverseColors, bool expandTo32Bit);
 

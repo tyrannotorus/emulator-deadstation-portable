@@ -690,6 +690,14 @@ void DrawEngineVulkan::Flush() {
 		} else {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
 		}
+		// Deadstation Portable: whether an alpha test can fail follows the vertices' alpha (IsAlphaTestTriviallyTrue): a new
+		// shader when it changes under the test
+		gstate_c.vertexMinAlpha = VertexMinAlpha();
+		if (gstate_c.vertexMinAlpha != lastVertexMinAlpha_) {
+			lastVertexMinAlpha_ = gstate_c.vertexMinAlpha;
+			if (gstate.isAlphaTestEnabled())
+				gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
+		}
 
 		if (textureNeedsApply) {
 			textureCache_->ApplyTexture();
@@ -822,6 +830,14 @@ void DrawEngineVulkan::Flush() {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && (hasColor || gstate.getMaterialAmbientA() == 255);
 		} else {
 			gstate_c.vertexFullAlpha = gstate_c.vertexFullAlpha && ((hasColor && (gstate.materialupdate & 1)) || gstate.getMaterialAmbientA() == 255) && (!gstate.isLightingEnabled() || gstate.getAmbientA() == 255);
+		}
+		// Deadstation Portable: whether an alpha test can fail follows the vertices' alpha (IsAlphaTestTriviallyTrue): a new
+		// shader when it changes under the test
+		gstate_c.vertexMinAlpha = VertexMinAlpha();
+		if (gstate_c.vertexMinAlpha != lastVertexMinAlpha_) {
+			lastVertexMinAlpha_ = gstate_c.vertexMinAlpha;
+			if (gstate.isAlphaTestEnabled())
+				gstate_c.Dirty(DIRTY_FRAGMENTSHADER_STATE);
 		}
 
 		gpuStats.numUncachedVertsDrawn += vertexCount;
@@ -1096,6 +1112,46 @@ void DrawEngineVulkan::Flush() {
 
 	framebufferManager_->SetColorUpdated(gstate_c.skipDrawReason);
 
+}
+
+// Deadstation Portable: the smallest alpha the flush's vertices give the fragment shader: 255 when all are full, else (under an
+// alpha test, the only reader) from the game's own vertex colors where they reach it unchanged (no lighting, no morph, no
+// tessellation), or the material's alpha without vertex colors; 0 when unknown. Each draw's whole vertex range, as decoded.
+u8 DrawEngineVulkan::VertexMinAlpha() const {
+	if (gstate_c.vertexFullAlpha)
+		return 255;
+	if (!gstate.isAlphaTestEnabled() || (gstate.isLightingEnabled() && !gstate.isModeThrough()) || useHWTessellation_ || dec_->morphcount != 1)
+		return 0;
+	if (dec_->col == 0)
+		return gstate.getMaterialAmbientA();
+	const int size = dec_->VertexSize();
+	u32 minAlpha = 255;
+	for (int j = 0; j < numDrawVerts_; j++) {
+		const DeferredVerts &dv = drawVerts_[j];
+		const u8 *c = (const u8 *)dv.verts + dv.indexLowerBound * size + dec_->coloff;
+		const int n = dv.indexUpperBound - dv.indexLowerBound + 1;
+		switch (dec_->col) {
+		case GE_VTYPE_COL_8888 >> GE_VTYPE_COL_SHIFT:
+			for (int k = 0; k < n; k++, c += size)
+				minAlpha = std::min(minAlpha, (u32)c[3]);
+			break;
+		case GE_VTYPE_COL_4444 >> GE_VTYPE_COL_SHIFT:
+			for (int k = 0; k < n; k++, c += size)
+				minAlpha = std::min(minAlpha, (u32)(c[1] >> 4) * 17);
+			break;
+		case GE_VTYPE_COL_5551 >> GE_VTYPE_COL_SHIFT:
+			for (int k = 0; k < n; k++, c += size) {
+				if (!(c[1] & 0x80))
+					return 0;
+			}
+			break;
+		case GE_VTYPE_COL_565 >> GE_VTYPE_COL_SHIFT:
+			break;
+		default:
+			return 0;
+		}
+	}
+	return (u8)minAlpha;
 }
 
 void DrawEngineVulkan::ResetAfterDraw() {

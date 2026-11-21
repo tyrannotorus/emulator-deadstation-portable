@@ -398,6 +398,8 @@ void TextureCacheVulkan::BuildTexture(TexCacheEntry *const entry) {
 		"Texture Upload (%08x) video=%d", entry->addr, plan.isVideo);
 
 	// Upload the texture data. We simply reuse the same loop for 3D texture slices instead of mips, if we have those.
+	// Deadstation Portable: each level loaded lowers it (LoadVulkanTextureLevel); mips the GPU makes are averages of these
+	entry->minAlpha = 255;
 	int levels;
 	if (plan.depth > 1) {
 		levels = plan.depth;
@@ -517,6 +519,8 @@ void TextureCacheVulkan::LoadVulkanTextureLevel(TexCacheEntry &entry, uint8_t *w
 
 	CheckAlphaResult alphaResult = DecodeTextureLevel(writePtr, rowPitch, tfmt, clutformat, texaddr, level, bufw, texDecFlags);
 	entry.SetAlphaStatus(alphaResult, level);
+	// Deadstation Portable: the smallest alpha of all the levels loaded (BuildTexture starts it at 255)
+	entry.minAlpha = std::min(entry.minAlpha, alphaResult == CHECKALPHA_FULL ? (u8)255 : decodeMinAlpha_);
 }
 
 void TextureCacheVulkan::BoundFramebufferTexture() {

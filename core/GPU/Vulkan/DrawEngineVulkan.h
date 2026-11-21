@@ -170,6 +170,8 @@ private:
 	bool projectedCullFootprint(int &indexCount, ScissorRect &box);
 	bool projPositionsInSource() const;
 	bool projFromSource_ = false;
+	u8 lastVertexMinAlpha_ = 255;	// the last flush's gstate_c.vertexMinAlpha (a change re-picks the fragment shader)
+	u8 VertexMinAlpha() const;
 
 	Draw::DrawContext *draw_;
 

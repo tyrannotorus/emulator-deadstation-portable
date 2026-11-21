@@ -1563,7 +1563,37 @@ static void Expand4To8Bits(u8 *dest, const u8 *src, int srcWidth) {
 	}
 }
 
+// The smallest alpha of the palette entries an indexed texture's texels use (w texels a row; nibbles: two indices a byte, the low
+// one first), through the game's index shift, mask and start (as the de-indexers read them).
+u8 TextureCacheCommon::UsedClutMinAlpha32(const u8 *texptr, int rowBytes, int w, int h, bool nibbles, const u32 *clut) {
+	bool seen[256] = {};
+	const int n = nibbles ? (w + 1) / 2 : w;
+	for (int y = 0; y < h; y++) {
+		const u8 *row = texptr + y * rowBytes;
+		for (int x = 0; x < n; x++)
+			seen[row[x]] = true;
+	}
+	bool used[256] = {};
+	for (int b = 0; b < 256; b++) {
+		if (!seen[b])
+			continue;
+		if (nibbles) {
+			used[b & 0xF] = true;
+			used[b >> 4] = true;
+		} else {
+			used[b] = true;
+		}
+	}
+	u32 minAlpha = 255;
+	for (int i = 0; i < 256; i++) {
+		if (used[i])
+			minAlpha = std::min(minAlpha, clut[gstate.transformClutIndex(i)] >> 24);
+	}
+	return (u8)minAlpha;
+}
+
 CheckAlphaResult TextureCacheCommon::DecodeTextureLevel(u8 *out, int outPitch, GETextureFormat format, GEPaletteFormat clutformat, uint32_t texaddr, int level, int bufw, TexDecodeFlags flags) {
+	decodeMinAlpha_ = 0;
 	u32 alphaSum = 0xFFFFFFFF;
 	u32 fullAlphaMask = 0x0;
 
@@ -1675,6 +1705,8 @@ CheckAlphaResult TextureCacheCommon::DecodeTextureLevel(u8 *out, int outPitch, G
 			for (int y = 0; y < h; ++y) {
 				DeIndexTexture4<u32>((u32 *)(out + outPitch * y), texptr + (bufw * y) / 2, w, clut, &alphaSum);
 			}
+			if (!AlphaSumIsFull(alphaSum, fullAlphaMask))
+				decodeMinAlpha_ = UsedClutMinAlpha32(texptr, bufw / 2, w, h, true, clut);
 		}
 		break;
 
@@ -1895,6 +1927,8 @@ CheckAlphaResult TextureCacheCommon::ReadIndexedTex(u8 *out, int outPitch, int l
 			for (int y = 0; y < h; ++y) {
 				DeIndexTexture((u32 *)(out + outPitch * y), (const u8 *)texptr + bufw * y, w, clut32, &alphaSum);
 			}
+			if (!AlphaSumIsFull(alphaSum, 0xFF000000))
+				decodeMinAlpha_ = UsedClutMinAlpha32(texptr, bufw, w, h, false, clut32);
 			break;
 
 		case 2:
@@ -2008,7 +2042,7 @@ void TextureCacheCommon::ApplyTexture(bool doBind) {
 		if (doBind) {
 			BindTexture(entry);
 		}
-		gstate_c.SetTextureFullAlpha(entry->GetAlphaStatus() == TexCacheEntry::STATUS_ALPHA_FULL);
+		gstate_c.SetTextureFullAlpha(entry->GetAlphaStatus() == TexCacheEntry::STATUS_ALPHA_FULL, entry->minAlpha);
 		gstate_c.SetTextureIs3D((entry->status & TexCacheEntry::STATUS_3D) != 0);
 		gstate_c.SetTextureIsArray(false);
 		gstate_c.SetTextureIsBGRA((entry->status & TexCacheEntry::STATUS_BGRA) != 0);

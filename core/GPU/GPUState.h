@@ -532,10 +532,19 @@ struct GPUStateCache {
 			Dirty(DIRTY_FRAGMENTSHADER_STATE);
 		}
 	}
-	void SetTextureFullAlpha(bool fullAlpha) {
+	// Deadstation Portable: minAlpha, the texture's smallest texel alpha when not full (0: unknown; the texture cache's own
+	// entries know it, TexCacheEntry::minAlpha). It decides whether an alpha test can fail (IsAlphaTestTriviallyTrue), so a
+	// change matters only to a draw with the test on (turning the test on dirties the shader itself).
+	void SetTextureFullAlpha(bool fullAlpha, u8 minAlpha = 0) {
 		if (fullAlpha != textureFullAlpha) {
 			textureFullAlpha = fullAlpha;
 			Dirty(DIRTY_FRAGMENTSHADER_STATE | DIRTY_TEX_ALPHA_MUL);
+		}
+		const u8 m = fullAlpha ? 255 : minAlpha;
+		if (m != textureMinAlpha) {
+			textureMinAlpha = m;
+			if (gstate.isAlphaTestEnabled())
+				Dirty(DIRTY_FRAGMENTSHADER_STATE);
 		}
 	}
 	void SetNeedShaderTexclamp(bool need) {
@@ -603,7 +612,11 @@ public:
 	bool clearingDepth;
 
 	bool textureFullAlpha;
+	u8 textureMinAlpha = 0;
 	bool vertexFullAlpha;
+	// Deadstation Portable: the smallest alpha the draw's vertices give the fragment shader (255 full, 0 unknown), found under an
+	// alpha test (DrawEngineVulkan::VertexMinAlpha)
+	u8 vertexMinAlpha = 255;
 
 	int skipDrawReason;
 

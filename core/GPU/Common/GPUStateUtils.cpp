@@ -67,6 +67,29 @@ bool NeedsTestDiscard() {
 }
 
 bool IsAlphaTestTriviallyTrue() {
+	// Deadstation Portable: no alpha below the smallest one a draw can make passes nothing it shouldn't, so a test that this
+	// passes is trivially true. The shader's alpha is the vertices' times the texture's (modulate, blend, add), or one of the two
+	// (decal, replace, no texture, its alpha unused): never below their smallest product; filtering, interpolation and mips
+	// never go below the smallest texel or vertex. One step of margin for the shader's arithmetic. (A discard costs the
+	// PowerVR its hidden surface removal: LEGO Indiana Jones' `alpha > 4` on textures and vertices it never fails.)
+	if (gstate.getAlphaTestMask() == 0xFF) {
+		const int texMinAlpha = (!gstate.isTextureMapEnabled() || !gstate.isTextureAlphaUsed()) ? 255 : gstate_c.textureMinAlpha;
+		const int minAlpha = gstate_c.vertexMinAlpha * texMinAlpha / 255;
+		const int ref = gstate.getAlphaTestRef();
+		switch (gstate.getAlphaTestFunction()) {
+		case GE_COMP_GREATER:
+		case GE_COMP_NOTEQUAL:
+			if (minAlpha > ref + 1)
+				return true;
+			break;
+		case GE_COMP_GEQUAL:
+			if (minAlpha > ref)
+				return true;
+			break;
+		default:
+			break;
+		}
+	}
 	switch (gstate.getAlphaTestFunction()) {
 	case GE_COMP_NEVER:
 		return false;
