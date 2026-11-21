@@ -1177,53 +1177,52 @@ static void RemoveDrawCommands(FastVec<VkRenderData> *cmds) {
 }
 
 static void CleanupRenderCommands(FastVec<VkRenderData> *cmds) {
-	size_t lastCommand[(int)VKRRenderCommand::NUM_RENDER_COMMANDS];
-	memset(lastCommand, -1, sizeof(lastCommand));
-
-	// Find any duplicate state commands (likely from RemoveDrawCommands.)
-	for (size_t i = 0; i < cmds->size(); ++i) {
-		auto &c = cmds->at(i);
-		auto &lastOfCmd = lastCommand[(uint8_t)c.cmd];
-
-		switch (c.cmd) {
-		case VKRRenderCommand::REMOVED:
+	// Deadstation Portable: the last of each state command since the last boundary (a draw or anything else that isn't state)
+	// in five locals, and the boundary as an index: a last one before it doesn't count, so a boundary is one move. (The table
+	// of every kind, which only these five ever entered, lived on the stack and was stored over at each draw, and the commands'
+	// pointer was loaded again after every store.) A command's kind sorted by one bit test. The same commands removed.
+	VkRenderData *const c = cmds->begin();
+	const ptrdiff_t n = (ptrdiff_t)cmds->size();
+	ptrdiff_t boundary = -1;
+	ptrdiff_t stencil = -1, blend = -1, viewport = -1, scissor = -1, push = -1;
+	auto bit = [](VKRRenderCommand k) { return 1u << (int)k; };
+	const u32 ignored = bit(VKRRenderCommand::REMOVED) | bit(VKRRenderCommand::CLEAR);  // don't participate in state
+	const u32 state = bit(VKRRenderCommand::STENCIL) | bit(VKRRenderCommand::BLEND) | bit(VKRRenderCommand::VIEWPORT) |
+		bit(VKRRenderCommand::SCISSOR) | bit(VKRRenderCommand::PUSH_CONSTANTS);
+	static_assert((int)VKRRenderCommand::NUM_RENDER_COMMANDS <= 32, "a kind a bit");
+	// a state command replacing an earlier one of its kind since the boundary: that one can go
+	auto replace = [c, &boundary](ptrdiff_t &last, ptrdiff_t i) {
+		if (last > boundary)
+			c[last].cmd = VKRRenderCommand::REMOVED;
+		last = i;
+	};
+	for (ptrdiff_t i = 0; i < n; ++i) {
+		const VKRRenderCommand k = c[i].cmd;
+		const u32 b = bit(k);
+		if (b & ignored)
 			continue;
-
-		case VKRRenderCommand::VIEWPORT:
-		case VKRRenderCommand::SCISSOR:
-		case VKRRenderCommand::BLEND:
-		case VKRRenderCommand::STENCIL:
-			if (lastOfCmd != -1) {
-				cmds->at(lastOfCmd).cmd = VKRRenderCommand::REMOVED;
-			}
-			break;
-
-		case VKRRenderCommand::PUSH_CONSTANTS:
-			// TODO: For now, we have to keep this one (it has an offset.)  Still update lastCommand.
-			break;
-
-		case VKRRenderCommand::CLEAR:
-			// Ignore, doesn't participate in state.
-			continue;
-
-		case VKRRenderCommand::DRAW_INDEXED:
-		case VKRRenderCommand::DRAW:
-		default:
-			// Boundary - must keep state before this.
-			memset(lastCommand, -1, sizeof(lastCommand));
+		if (!(b & state)) {
+			// Boundary (DRAW, DRAW_INDEXED, anything else) - must keep state before this.
+			boundary = i;
 			continue;
 		}
-
-		lastOfCmd = i;
+		switch (k) {
+		case VKRRenderCommand::STENCIL: replace(stencil, i); break;
+		case VKRRenderCommand::BLEND: replace(blend, i); break;
+		case VKRRenderCommand::VIEWPORT: replace(viewport, i); break;
+		case VKRRenderCommand::SCISSOR: replace(scissor, i); break;
+		default:
+			// PUSH_CONSTANTS. TODO: For now, we have to keep this one (it has an offset.)  Still update the last one.
+			push = i;
+			break;
+		}
 	}
 
-	// At this point, anything in lastCommand can be cleaned up too.
+	// At this point, the last of each kind since the boundary can be cleaned up too.
 	// Note that it's safe to remove the last unused PUSH_CONSTANTS here.
-	for (size_t i = 0; i < ARRAY_SIZE(lastCommand); ++i) {
-		auto &lastOfCmd = lastCommand[i];
-		if (lastOfCmd != -1) {
-			cmds->at(lastOfCmd).cmd = VKRRenderCommand::REMOVED;
-		}
+	for (const ptrdiff_t last : { stencil, blend, viewport, scissor, push }) {
+		if (last > boundary)
+			c[last].cmd = VKRRenderCommand::REMOVED;
 	}
 }
 
