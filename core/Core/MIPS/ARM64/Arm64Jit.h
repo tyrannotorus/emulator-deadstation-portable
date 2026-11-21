@@ -289,6 +289,7 @@ public:
 		Arm64Gen::FixupBranch branch;
 		Kind kind;
 		u32 destination;
+		Arm64Gen::ARM64Reg pcReg = Arm64Gen::INVALID_REG;  // OutOfTime, NotCompiled: the W register holding the target
 	};
 	std::vector<ColdExit> coldExits_;
 

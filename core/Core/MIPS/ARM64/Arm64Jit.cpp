@@ -378,11 +378,11 @@ void Arm64Jit::DoJit(u32 em_address, JitBlock *b) {
 			B((const void *)dispatcherPCInSCRATCH1);
 			break;
 		case ColdExit::OutOfTime:
-			MovToPC(SCRATCH1);
+			MovToPC(cold.pcReg);
 			B((const void *)dispatcher);
 			break;
 		case ColdExit::NotCompiled:
-			MovToPC(SCRATCH1);
+			MovToPC(cold.pcReg);
 			B((const void *)dispatcherNoCheck);
 			break;
 		}
@@ -688,17 +688,24 @@ void Arm64Jit::WriteExit(u32 destination, int exit_num) {
 void Arm64Jit::WriteExitDestInR(ARM64Reg Reg) {
 	// TODO: If not fast memory, check for invalid address in reg and trigger exception.
 	WriteDownCount();
-	if (Reg != SCRATCH1)
-		MOV(SCRATCH1, Reg);
-	// The dispatcher, here: each jump gets a branch prediction of its own, where one shared branch was wrong nearly every time.
-	coldExits_.push_back({ B(CC_MI), ColdExit::OutOfTime, 0 });
-	LDR(SCRATCH2, MEMBASEREG, SCRATCH1_64);
 	// (Nothing's in FLAGTEMPREG at the end of a block.)
 	const ARM64Reg top = DecodeReg(FLAGTEMPREG);
+	// Deadstation Portable: the target read from the register it's in, with no copy into SCRATCH1 first: the load's 32-bit
+	// index is zero-extended (UXTW) as the copy's 32-bit move zeroed the top, and the out-of-line stubs store that register
+	// as the PC (nothing below writes it). Only a register the dispatch writes, SCRATCH2 or FLAGTEMPREG's (the target of a jr
+	// whose delay slot changes it), is copied first, as before.
+	_dbg_assert_(!Is64Bit(Reg));
+	if (Reg == SCRATCH2 || DecodeReg(Reg) == top) {
+		MOV(SCRATCH1, Reg);
+		Reg = SCRATCH1;
+	}
+	// The dispatcher, here: each jump gets a branch prediction of its own, where one shared branch was wrong nearly every time.
+	coldExits_.push_back({ B(CC_MI), ColdExit::OutOfTime, 0, Reg });
+	LDR(SCRATCH2, MEMBASEREG, Reg);
 	LSR(top, SCRATCH2, 24);
 	ANDI2R(SCRATCH2, SCRATCH2, 0x00FFFFFF);
 	CMP(top, MIPS_EMUHACK_OPCODE >> 24);
-	coldExits_.push_back({ B(CC_NEQ), ColdExit::NotCompiled, 0 });
+	coldExits_.push_back({ B(CC_NEQ), ColdExit::NotCompiled, 0, Reg });
 	ADD(SCRATCH2_64, JITBASEREG, SCRATCH2_64);
 	BR(SCRATCH2_64);
 }
