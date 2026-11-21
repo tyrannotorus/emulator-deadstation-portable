@@ -354,6 +354,11 @@ void ComputeFragmentShaderID(FShaderID *id_out, const ComputedPipelineState &pip
 
 		id.SetBit(FS_BIT_ENABLE_FOG, enableFog);  // TODO: Will be moved back to the ubershader.
 
+		// Deadstation Portable: the common case, texture alpha used and no color doubling, is its own plain shader; the ubershader
+		// (both read from a uniform: a max and a multiply-clamp a pixel, a large share of a short shader on the PowerVR) stays for the
+		// rest. A texture function change picks the shader again either way (GE_CMD_TEXFUNC dirties it).
+		if (uberShader && enableTexAlpha && !enableColorDouble)
+			uberShader = false;
 		id.SetBit(FS_BIT_UBERSHADER, uberShader);
 		if (!uberShader) {
 			id.SetBit(FS_BIT_TEXALPHA, enableTexAlpha);

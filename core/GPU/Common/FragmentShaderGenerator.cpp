@@ -825,6 +825,10 @@ bool GenerateFragmentShader(const FShaderID &id, char *buffer, const ShaderLangu
 				}
 			} else if (enableColorDouble) {
 				p.C("  v.rgb = clamp(v.rgb * 2.0, 0.0, 1.0);\n");
+			} else if (enableFog || enableColorTest || replaceBlend != REPLACE_BLEND_NO || simulateLogicOpType != LOGICOPTYPE_NORMAL || colorWriteMask || blueToAlpha) {
+				// Deadstation Portable: clamped as the ubershader clamps it (its multiply by 1.0, then this), so the plain shader of the
+				// ubershader's common case (ShaderId.cpp) draws exactly what it would (an add or a secondary color can pass 1.0)
+				p.C("  v.rgb = clamp(v.rgb, 0.0, 1.0);\n");
 			}
 		} else {
 			// No texture mapping
