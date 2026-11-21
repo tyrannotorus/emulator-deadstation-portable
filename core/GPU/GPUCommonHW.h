@@ -105,6 +105,8 @@ public:
 private:
 	void CheckDepthUsage(VirtualFramebuffer *vfb) override;
 	void CheckFlushOp(int cmd, u32 diff);
+	// Deadstation Portable: a matrix's data words behind its NUMBER command (see GPUCommonHW.cpp)
+	int LoadMatrixWords(const u32_le *src, u32 *dst, int end, u32 cmd, u64 dirty);
 
 protected:
 	void UpdateCmdInfo() override;

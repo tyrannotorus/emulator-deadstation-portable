@@ -1392,6 +1392,34 @@ void GPUCommonHW::Execute_LoadClut(u32 op, u32 diff) {
 	textureCache_->LoadClut(gstate.getClutAddress(), gstate.getClutLoadBytes());
 }
 
+// Deadstation Portable: a matrix's data words right behind its NUMBER command, as the loops of each matrix took them: while
+// the word is cmd and fewer than end (end >= 1). Returns how many. Those that equal what dst holds needed nothing: they're
+// passed over first, four at a time in NEON (never reading past end), and when one differs the draws so far are flushed and it
+// and the rest are written (the words after the flush read after it, as before), dirty set. Flushed once: the loops called
+// Flush() at each changed word, and every way out of DrawEngineVulkan::Flush leaves nothing queued, so the later calls
+// returned at their first statement. A word written that equals dst's was the same value.
+inline __attribute__((always_inline)) int GPUCommonHW::LoadMatrixWords(const u32_le *src, u32 *dst, int end, u32 cmd, u64 dirty) {
+	int i = 0;
+#if PPSSPP_ARCH(ARM64_NEON)
+	const uint32x4_t vcmd = vdupq_n_u32(cmd);
+	for (; i + 4 <= end; i += 4) {
+		const uint32x4_t w = vld1q_u32((const uint32_t *)src + i);
+		const uint32x4_t same = vandq_u32(vceqq_u32(vshrq_n_u32(w, 24), vcmd), vceqq_u32(vshlq_n_u32(w, 8), vld1q_u32(dst + i)));
+		if (vminvq_u32(same) == 0)
+			break;	// the first word that isn't the same is in this group
+	}
+#endif
+	for (; i < end && (src[i] >> 24) == cmd && (src[i] << 8) == dst[i]; i++) {
+	}
+	if (i < end && (src[i] >> 24) == cmd) {
+		Flush();
+		for (; i < end && (src[i] >> 24) == cmd; i++)
+			dst[i] = src[i] << 8;
+		gstate_c.Dirty(dirty);
+	}
+	return i;
+}
+
 void GPUCommonHW::Execute_WorldMtxNum(u32 op, u32 diff) {
 	if (!currentList) {
 		gstate.worldmtxnum = (GE_CMD_WORLDMATRIXNUMBER << 24) | (op & 0xF);
@@ -1411,19 +1439,8 @@ void GPUCommonHW::Execute_WorldMtxNum(u32 op, u32 diff) {
 		fastLoad = false;
 	}
 
-	if (fastLoad) {
-		while ((src[i] >> 24) == GE_CMD_WORLDMATRIXDATA) {
-			const u32 newVal = src[i] << 8;
-			if (dst[i] != newVal) {
-				Flush();
-				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_WORLDMATRIX);
-			}
-			if (++i >= end) {
-				break;
-			}
-		}
-	}
+	if (fastLoad)
+		i = LoadMatrixWords(src, dst, end, GE_CMD_WORLDMATRIXDATA, DIRTY_WORLDMATRIX);
 
 	const int count = i;
 	gstate.worldmtxnum = (GE_CMD_WORLDMATRIXNUMBER << 24) | ((op & 0xF) + count);
@@ -1464,19 +1481,8 @@ void GPUCommonHW::Execute_ViewMtxNum(u32 op, u32 diff) {
 		fastLoad = false;
 	}
 
-	if (fastLoad) {
-		while ((src[i] >> 24) == GE_CMD_VIEWMATRIXDATA) {
-			const u32 newVal = src[i] << 8;
-			if (dst[i] != newVal) {
-				Flush();
-				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_VIEWMATRIX | DIRTY_CULL_PLANES);
-			}
-			if (++i >= end) {
-				break;
-			}
-		}
-	}
+	if (fastLoad)
+		i = LoadMatrixWords(src, dst, end, GE_CMD_VIEWMATRIXDATA, DIRTY_VIEWMATRIX | DIRTY_CULL_PLANES);
 
 	const int count = i;
 	gstate.viewmtxnum = (GE_CMD_VIEWMATRIXNUMBER << 24) | ((op & 0xF) + count);
@@ -1517,19 +1523,8 @@ void GPUCommonHW::Execute_ProjMtxNum(u32 op, u32 diff) {
 		fastLoad = false;
 	}
 
-	if (fastLoad) {
-		while ((src[i] >> 24) == GE_CMD_PROJMATRIXDATA) {
-			const u32 newVal = src[i] << 8;
-			if (dst[i] != newVal) {
-				Flush();
-				dst[i] = newVal;
-				gstate_c.Dirty(DIRTY_PROJMATRIX | DIRTY_CULL_PLANES);
-			}
-			if (++i >= end) {
-				break;
-			}
-		}
-	}
+	if (fastLoad)
+		i = LoadMatrixWords(src, dst, end, GE_CMD_PROJMATRIXDATA, DIRTY_PROJMATRIX | DIRTY_CULL_PLANES);
 
 	const int count = i;
 	gstate.projmtxnum = (GE_CMD_PROJMATRIXNUMBER << 24) | ((op & 0xF) + count);
@@ -1571,20 +1566,8 @@ void GPUCommonHW::Execute_TgenMtxNum(u32 op, u32 diff) {
 		fastLoad = false;
 	}
 
-	if (fastLoad) {
-		while ((src[i] >> 24) == GE_CMD_TGENMATRIXDATA) {
-			const u32 newVal = src[i] << 8;
-			if (dst[i] != newVal) {
-				Flush();
-				dst[i] = newVal;
-				// We check the matrix to see if we need projection.
-				gstate_c.Dirty(DIRTY_TEXMATRIX | DIRTY_FRAGMENTSHADER_STATE);
-			}
-			if (++i >= end) {
-				break;
-			}
-		}
-	}
+	if (fastLoad)
+		i = LoadMatrixWords(src, dst, end, GE_CMD_TGENMATRIXDATA, DIRTY_TEXMATRIX | DIRTY_FRAGMENTSHADER_STATE);
 
 	const int count = i;
 	gstate.texmtxnum = (GE_CMD_TGENMATRIXNUMBER << 24) | ((op & 0xF) + count);
