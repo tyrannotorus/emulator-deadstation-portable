@@ -427,7 +427,7 @@ TexCacheEntry *TextureCacheCommon::SetTexture() {
 
 	u32 minihash = MiniHash((const u32 *)Memory::GetPointerUnchecked(texaddr));
 
-	TexCache::iterator entryIter = cache_.find(cachekey);
+	TexCache::iterator entryIter = FindEntry(cachekey);
 	TexCacheEntry *entry = nullptr;
 
 	// Note: It's necessary to reset needshadertexclamp, for otherwise DIRTY_TEXCLAMP won't get set later.
@@ -2383,6 +2383,8 @@ void TextureCacheCommon::Clear(bool delete_them) {
 	for (TexCache::iterator iter = cache_.begin(); iter != cache_.end(); ++iter) {
 		ReleaseTexture(iter->second.get(), delete_them);
 	}
+	for (FoundEntry &found : found_)
+		found.valid = false;
 	// In case the setting was changed, we ALWAYS clear the secondary cache (enabled or not.)
 	for (TexCache::iterator iter = secondCache_.begin(); iter != secondCache_.end(); ++iter) {
 		ReleaseTexture(iter->second.get(), delete_them);
@@ -2407,6 +2409,9 @@ void TextureCacheCommon::Clear(bool delete_them) {
 }
 
 void TextureCacheCommon::DeleteTexture(TexCache::iterator it) {
+	FoundEntry &found = found_[FoundSlot(it->first)];
+	if (found.valid && found.key == it->first)
+		found.valid = false;
 	ReleaseTexture(it->second.get(), true);
 	cacheSizeEstimate_ -= EstimateTexMemoryUsage(it->second.get());
 	cache_.erase(it);

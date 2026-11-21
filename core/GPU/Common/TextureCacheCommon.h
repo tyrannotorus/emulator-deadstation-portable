@@ -491,6 +491,28 @@ protected:
 
 	TexCache cache_;
 	u32 cacheSizeEstimate_ = 0;
+	// Deadstation Portable: what cache_.find answered, by key, 256 ways: a tree walk of a few hundred entries was a chain of
+	// dependent loads at each texture change. A map iterator stays good until its entry is erased, and only DeleteTexture and
+	// Clear erase (they forget it here), so an answer kept is the one find would give. Only found entries are kept.
+	struct FoundEntry {
+		u64 key;
+		TexCache::iterator it;
+		bool valid;
+	};
+	FoundEntry found_[256]{};
+	static int FoundSlot(u64 key) {
+		const u32 h = (u32)key ^ (u32)(key >> 32);
+		return (int)((h * 0x9E3779B1u) >> 24);
+	}
+	TexCache::iterator FindEntry(u64 key) {
+		FoundEntry &f = found_[FoundSlot(key)];
+		if (f.valid && f.key == key)
+			return f.it;
+		const TexCache::iterator it = cache_.find(key);
+		if (it != cache_.end())
+			f = { key, it, true };
+		return it;
+	}
 
 	TexCache secondCache_;
 	u32 secondCacheSizeEstimate_ = 0;
