@@ -3,6 +3,8 @@
 
 #include "Core/HLE/sceCtrl.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -18,14 +20,16 @@ namespace
 // the Brick's buttons as SDL numbers them
 enum : int { PadB = 0, PadA = 1, PadY = 2, PadX = 3, PadL1 = 4, PadR1 = 5, PadSelect = 6, PadStart = 7,
 	PadFn1 = 9, PadFn2 = 10, PadMinus = 13, PadPlus = 14 };
-enum : int { AxisL2 = 2, AxisR2 = 5 };
+// The stick, where there is one (the Brick Pro's): NextUI's AXIS_LX and AXIS_LY, about ±30000, down positive. The Brick
+// has none: its axes 0 and 1 stay at 0.
+enum : int { StickX = 0, StickY = 1 };
 
 const std::vector<Control> Controls {
 	{ Up, "Up", "" }, { Down, "Down", "" }, { Left, "Left", "" }, { Right, "Right", "" },
 	{ Cross, "Cross", "" }, { Circle, "Circle", "" }, { Square, "Square", "" }, { Triangle, "Triangle", "" },
 	{ L, "L", "" }, { R, "R", "" },
 	{ Select, "Select", "" }, { Start, "Start", "" },
-	{ SwapDpad, "Swap D-Pad", "Swaps the d-pad between the PSP's d-pad and its analog nub, for this game." },
+	{ SwapDpad, "Swap D-Pad", "Swaps the d-pad between the PSP's d-pad and its analog nub, for this game. A stick, if there is one, takes the other." },
 	{ SaveState, "Save State", "Saves the game in the slot picked last." },
 	{ LoadState, "Load State", "Loads the game from the slot picked last." },
 	{ Screenshot, "Screenshot", "Saves a picture of the screen in Screenshots." },
@@ -56,6 +60,29 @@ bool forGame(Function f)
 		return false;
 	}
 	return (heldBack & (1u << f)) == 0;
+}
+
+// The stick as the nub, as PPSSPP has it at its defaults (ConvertAnalogStick): a deadzone of 0.15 on the larger axis, then
+// 1.1 times, so a stick short of ±32767 still reaches the nub's edge. x and y are -1 to 1, up positive.
+void stickAsNub(float sx, float sy, float& x, float& y)
+{
+	constexpr float Deadzone = 0.15f, Sensitivity = 1.1f;
+	const float norm = std::max(std::fabs(sx), std::fabs(sy));
+	if (norm <= Deadzone)
+	{
+		x = y = 0.f;
+		return;
+	}
+	const float mapped = std::min((norm - Deadzone) / (1.f - Deadzone) * Sensitivity, 1.f);
+	x = sx / norm * mapped;
+	y = sy / norm * mapped;
+}
+
+// The stick as the d-pad, as PPSSPP has it at its defaults (GetDeviceAxisThreshold): a direction is down past 0.75 on its
+// axis, less as the other axis is pushed (0.49 with it all the way), so a diagonal holds both.
+float stickThreshold(float other)
+{
+	return 0.75f * (1.f - std::fabs(other) * 0.35f);
 }
 
 // the defaults
@@ -230,14 +257,27 @@ void update()
 		if (forGame(b.function))
 			bits |= b.bit;
 	const bool up = forGame(Up), down = forGame(Down), left = forGame(Left), right = forGame(Right);
+	// the stick, -1 to 1, up positive
+	float sx = 0.f, sy = 0.f;
+	if (pad != nullptr)
+	{
+		sx = SDL_JoystickGetAxis(pad, StickX) * (1.f / 32767.f);
+		sy = -SDL_JoystickGetAxis(pad, StickY) * (1.f / 32767.f);
+	}
 	float x = 0.f, y = 0.f;
 	if (swapped)
 	{
+		// the d-pad the nub, the stick the d-pad
 		x = (right ? 1.f : 0.f) - (left ? 1.f : 0.f);
 		y = (up ? 1.f : 0.f) - (down ? 1.f : 0.f);
+		const float tx = stickThreshold(sy), ty = stickThreshold(sx);
+		bits |= (sy > ty ? CTRL_UP : 0) | (-sy > ty ? CTRL_DOWN : 0) | (-sx > tx ? CTRL_LEFT : 0) | (sx > tx ? CTRL_RIGHT : 0);
 	}
 	else
+	{
 		bits |= (up ? CTRL_UP : 0) | (down ? CTRL_DOWN : 0) | (left ? CTRL_LEFT : 0) | (right ? CTRL_RIGHT : 0);
+		stickAsNub(sx, sy, x, y);
+	}
 	const u32 all = CTRL_CROSS | CTRL_CIRCLE | CTRL_SQUARE | CTRL_TRIANGLE | CTRL_LTRIGGER | CTRL_RTRIGGER | CTRL_SELECT | CTRL_START
 			| CTRL_UP | CTRL_DOWN | CTRL_LEFT | CTRL_RIGHT;
 	{
@@ -246,7 +286,7 @@ void update()
 		static float lastX = 0.f, lastY = 0.f;
 		if (logCtrl && (bits != lastBits || x != lastX || y != lastY))
 		{
-			printf("ctrl %u: bits %x nub %.0f %.0f\n", SDL_GetTicks(), bits, x, y);
+			printf("ctrl %u: bits %x nub %.2f %.2f\n", SDL_GetTicks(), bits, x, y);
 			fflush(stdout);
 			lastBits = bits;
 			lastX = x;

@@ -317,8 +317,9 @@ std::vector<std::pair<int, bool>> padEvents()
 		}
 		case SDL_JOYAXISMOTION:
 		{
+			// the triggers only: a stick is the nub (controls::update()), never bound
 			static bool down[8];
-			if (event.jaxis.axis < 8)
+			if (event.jaxis.axis == controls::AxisL2 || event.jaxis.axis == controls::AxisR2)
 			{
 				const bool now = event.jaxis.value > 16384;
 				if (now != down[event.jaxis.axis])

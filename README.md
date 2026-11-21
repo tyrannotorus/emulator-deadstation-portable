@@ -64,7 +64,7 @@ Copy `build-brick/PSP-DEADSTATION-PORTABLE.pak` to the SD card's `Emus/tg5040/`.
 
 ### Controls
 
-MENU opens the menu (`ui/`, `core/deadstation/menu.cpp`): Continue, Save and Load (ten slots, with pictures), Options, Recomp Store and Quit. The Brick's A, B, X and Y are the PSP's Circle, Cross, Triangle and Square; L1 and R1 are L and R. The Brick has no stick: R2 swaps the d-pad between the PSP's d-pad and its analog nub, remembered for each game. FN2 saves a state, FN1 loads it. Controls remaps them all.
+MENU opens the menu (`ui/`, `core/deadstation/menu.cpp`): Continue, Save and Load (ten slots, with pictures), Options, Recomp Store and Quit. The Brick's A, B, X and Y are the PSP's Circle, Cross, Triangle and Square; L1 and R1 are L and R. A stick, where there is one (the Brick Pro's), is the PSP's analog nub; the Brick has none. R2 swaps them, as PPSSPP's AxisSwap: the d-pad becomes the nub and the stick the d-pad, remembered for each game. FN2 saves a state, FN1 loads it. Controls remaps them all.
 
 ### Licences
 

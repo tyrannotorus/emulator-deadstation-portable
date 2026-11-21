@@ -1,7 +1,7 @@
 // The Brick's controls (trimui_inputd's Xbox 360 pad through SDL's joystick API) and what each does:
 // the PSP's buttons and the emulator's own functions, remapped in Options > Controls and kept in
-// <home>/controls.cfg. MENU is always the menu. The Brick has no stick, so the d-pad stands in for the PSP's nub when
-// swapped (SwapDpad): remembered for each game.
+// <home>/controls.cfg. MENU is always the menu. A stick, where there is one (the Brick Pro's), is the PSP's nub; the Brick
+// has none. Swapped (SwapDpad), the d-pad is the nub and the stick the d-pad, as PPSSPP's AxisSwap: remembered for each game.
 #pragma once
 #include <SDL.h>
 
@@ -14,6 +14,8 @@ namespace deadstation::controls
 
 // an input: a button (its number), a d-pad direction (HatUp..HatRight) or a trigger (Axis + its axis)
 enum : int { None = -1, HatUp = 256, HatDown, HatLeft, HatRight, Axis = 512 };
+// the triggers' axes, the only axes that are inputs: a stick is the nub (update()), never a button
+enum : int { AxisL2 = 2, AxisR2 = 5 };
 constexpr int MenuButton = 8;
 
 enum Function : int
@@ -49,7 +51,7 @@ void setGame(const std::string& romPath);
 bool dpadIsNub();
 void toggleDpad();
 
-// the PSP's buttons now, to the game
+// the PSP's buttons and nub now, to the game
 void update();
 // The menu (or a notice) has the pad: none of its buttons reach the game. When the game has it again, a button still held
 // stays away from the game until it's released.
