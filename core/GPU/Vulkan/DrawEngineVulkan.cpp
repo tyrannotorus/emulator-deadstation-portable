@@ -1057,10 +1057,35 @@ void DrawEngineVulkan::Flush() {
 				const float sx = vp.width / gstate_c.curRTWidth, sy = vp.height / gstate_c.curRTHeight;
 				const int x1 = (int)floorf(vp.x + minX * sx), y1 = (int)floorf(vp.y + minY * sy), x2 = (int)ceilf(vp.x + maxX * sx), y2 = (int)ceilf(vp.y + maxY * sy);
 				renderManager->SetDrawBounds(x1, y1, x2, y2);
-				// A first draw that replaces all it covers, with triangles that fill the rectangle: nothing that was there is ever seen.
-				if (prim == GE_PRIM_TRIANGLES && result.drawNumTrans >= 3 && !gstate.isAlphaTestEnabled() && !gstate.isColorTestEnabled() && !gstate.isStencilTestEnabled() && !gstate.isDepthTestEnabled() &&
+				// A leading draw that replaces all it covers, with triangles that fill the rectangle: nothing that was there is ever seen
+				// (VulkanRenderManager::NoteOverwritingDraw). Color: no test, no blend but a fixed one, every channel written. Clear mode
+				// writes what its masks say. Otherwise depth isn't touched (no depth test: no depth write either), and stencil, with its
+				// test ALWAYS (never read), is replaced by REPLACE or ZERO through a full write mask, left by KEEP; else the run ends.
+				bool overColor = false, overDepth = false, overStencil = false, runGoesOn = false;
+				if (gstate.isModeClear()) {
+					const bool fullMasks = gstate.getColorMask() == 0;
+					overColor = gstate.isClearModeColorMask() && gstate.isClearModeAlphaMask() && fullMasks;
+					overDepth = gstate.isClearModeDepthMask();
+					overStencil = gstate.isClearModeAlphaMask() && fullMasks && gstate.FrameBufFormat() != GE_FORMAT_565;
+					runGoesOn = overColor && (overStencil || !gstate.isClearModeAlphaMask());
+				} else if (!gstate.isAlphaTestEnabled() && !gstate.isColorTestEnabled() && !gstate.isDepthTestEnabled() &&
 					!gstate.isLogicOpEnabled() && gstate.getColorMask() == 0 &&
 					(!gstate.isAlphaBlendEnabled() || (gstate.getBlendFuncA() == GE_SRCBLEND_FIXA && gstate.getBlendFuncB() == GE_DSTBLEND_FIXB && gstate.getFixB() == 0 && gstate.getBlendEq() == GE_BLENDMODE_MUL_AND_ADD))) {
+					overColor = true;
+					if (!gstate.isStencilTestEnabled()) {
+						runGoesOn = true;
+					} else if (gstate.getStencilTestFunction() == GE_COMP_ALWAYS) {
+						const GEStencilOp op = gstate.getStencilOpZPass();
+						if (op == GE_STENCILOP_KEEP) {
+							runGoesOn = true;
+						} else if ((op == GE_STENCILOP_REPLACE || op == GE_STENCILOP_ZERO) && gstate.getStencilWriteMask() == 0 && gstate.FrameBufFormat() != GE_FORMAT_565) {
+							overStencil = true;
+							runGoesOn = true;
+						}
+					}
+				}
+				// (rectangles are triangles here: expanded, two each)
+				if (runGoesOn && (prim == GE_PRIM_TRIANGLES || prim == GE_PRIM_RECTANGLES) && result.drawNumTrans >= 3) {
 					float area = 0.0f;
 					for (int i = 0; i + 2 < result.drawNumTrans; i += 3) {
 						const TransformedVertex &a = result.drawBuffer[inds[i]], &b = result.drawBuffer[inds[i + 1]], &c = result.drawBuffer[inds[i + 2]];
@@ -1068,7 +1093,12 @@ void DrawEngineVulkan::Flush() {
 					}
 					const float boxArea = (maxX - minX) * (maxY - minY);
 					if (boxArea > 0.0f && fabsf(area - boxArea) <= boxArea * 0.001f && minX == floorf(minX) && minY == floorf(minY) && maxX == floorf(maxX) && maxY == floorf(maxY))
-						renderManager->NoteOverwritingDraw(x1, y1, x2, y2);
+					{
+						// the pixels whose centers it covers (the same as x1.. at a whole scale; fewer, never more, at another)
+						const int cx1 = (int)floorf(vp.x + minX * sx + 0.5f), cy1 = (int)floorf(vp.y + minY * sy + 0.5f);
+						const int cx2 = (int)floorf(vp.x + maxX * sx + 0.5f), cy2 = (int)floorf(vp.y + maxY * sy + 0.5f);
+						renderManager->NoteOverwritingDraw(cx1, cy1, cx2, cy2, overColor, overDepth, overStencil);
+					}
 				}
 			}
 

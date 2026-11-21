@@ -774,6 +774,9 @@ void VulkanQueueRunner::ApplyDeferredDraws(std::vector<VKRStep *> &steps) {
 			later->render.pipelineFlags |= src->render.pipelineFlags;
 			later->render.renderPassType = MergeRPTypes(later->render.renderPassType, src->render.renderPassType);
 			later->render.usesDepth = later->render.usesDepth || src->render.usesDepth;
+			// The moved draws come first now, so the pass starts as theirs did: what the later pass's own first draws overwrote
+			// (VulkanRenderManager::EndCurRenderStep) may be read by them.
+			later->render.colorLoad = src->render.colorLoad;
 			later->render.depthLoad = src->render.depthLoad;
 			later->render.stencilLoad = src->render.stencilLoad;
 			src->dependencies.clear();

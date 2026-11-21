@@ -493,15 +493,26 @@ public:
 		curRenderStep_->render.numDrawsKeepingDepthStencil++;
 	}
 
-	// The first draw of a pass replaces everything in this rectangle.
-	void NoteOverwritingDraw(int x1, int y1, int x2, int y2) {
-		if (curRenderStep_->render.numDraws == 0 && curRenderArea_.Empty()) {
-			overwrittenValid_ = true;
-			overwritten_.x1 = x1;
-			overwritten_.y1 = y1;
-			overwritten_.x2 = x2;
-			overwritten_.y2 = y2;
-		}
+	// The pass's leading draws (all its draws so far) replace everything in this rectangle: in color, depth, stencil, each one it
+	// overwrites (a draw that overwrites one and reads or partly writes another ends the run: the caller doesn't note it). Strips side by
+	// side merge into one rectangle; coverage a rectangle can't hold isn't added. What a pass's leading draws cover in full needn't be
+	// read in (EndCurRenderStep): on a tiler that's the pass's area, from memory into the tile buffers.
+	void NoteOverwritingDraw(int x1, int y1, int x2, int y2, bool color = true, bool depth = false, bool stencil = false) {
+		if (!curRenderStep_ || curRenderStep_->render.numDraws != overwritingDraws_)
+			return;
+		overwritingDraws_++;
+		// only what the scissor lets it write
+		BoundingRect r;
+		r.x1 = std::max(x1, (int)curScissor_.offset.x);
+		r.y1 = std::max(y1, (int)curScissor_.offset.y);
+		r.x2 = std::min(x2, (int)(curScissor_.offset.x + curScissor_.extent.width));
+		r.y2 = std::min(y2, (int)(curScissor_.offset.y + curScissor_.extent.height));
+		if (color)
+			overwritten_[0].Add(r);
+		if (depth)
+			overwritten_[1].Add(r);
+		if (stencil)
+			overwritten_[2].Add(r);
 	}
 
 	void SetDrawBounds(int x1, int y1, int x2, int y2) {
@@ -659,8 +670,70 @@ private:
 	PipelineFlags curPipelineFlags_{};
 	BoundingRect curRenderArea_;
 	bool forceNewStep_ = false;
-	BoundingRect overwritten_;
-	bool overwrittenValid_ = false;
+	// What the leading overwriting draws of the current step cover (NoteOverwritingDraw), for color, depth, stencil: up to 64
+	// rectangles each (strips side by side merge as they come; past 64, more aren't added: coverage only ever under-counted).
+	struct Coverage {
+		BoundingRect r[64];
+		int n = 0;
+		void Reset() { n = 0; }
+		void Add(const BoundingRect &b) {
+			if (b.x2 <= b.x1 || b.y2 <= b.y1)
+				return;
+			if (n > 0) {
+				BoundingRect &c = r[n - 1];
+				if (b.y1 == c.y1 && b.y2 == c.y2 && b.x1 <= c.x2 && b.x2 >= c.x1) {
+					c.x1 = std::min(c.x1, b.x1);
+					c.x2 = std::max(c.x2, b.x2);
+					return;
+				}
+				if (b.x1 == c.x1 && b.x2 == c.x2 && b.y1 <= c.y2 && b.y2 >= c.y1) {
+					c.y1 = std::min(c.y1, b.y1);
+					c.y2 = std::max(c.y2, b.y2);
+					return;
+				}
+			}
+			if (n < 64)
+				r[n++] = b;
+		}
+		// Whether the rectangles' union holds all of area: each strip between the x edges is covered top to bottom.
+		bool Covers(const BoundingRect &area) const {
+			if (n == 0)
+				return false;
+			int xs[130];
+			int nx = 0;
+			xs[nx++] = area.x1;
+			xs[nx++] = area.x2;
+			for (int i = 0; i < n; i++) {
+				if (r[i].x1 > area.x1 && r[i].x1 < area.x2)
+					xs[nx++] = r[i].x1;
+				if (r[i].x2 > area.x1 && r[i].x2 < area.x2)
+					xs[nx++] = r[i].x2;
+			}
+			std::sort(xs, xs + nx);
+			nx = (int)(std::unique(xs, xs + nx) - xs);
+			for (int k = 0; k + 1 < nx; k++) {
+				const int xa = xs[k], xb = xs[k + 1];
+				std::pair<int, int> ys[64];
+				int ny = 0;
+				for (int i = 0; i < n; i++) {
+					if (r[i].x1 <= xa && r[i].x2 >= xb)
+						ys[ny++] = { r[i].y1, r[i].y2 };
+				}
+				std::sort(ys, ys + ny);
+				int cur = area.y1;
+				for (int i = 0; i < ny && cur < area.y2; i++) {
+					if (ys[i].first > cur)
+						return false;
+					cur = std::max(cur, ys[i].second);
+				}
+				if (cur < area.y2)
+					return false;
+			}
+			return true;
+		}
+	};
+	Coverage overwritten_[3];
+	int overwritingDraws_ = 0;
 	VkRect2D curScissor_{};
 	VkRect2D curDrawBounds_{};
 	bool hasDrawBounds_ = false;

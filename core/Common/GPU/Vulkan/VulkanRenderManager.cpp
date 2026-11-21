@@ -828,11 +828,18 @@ void VulkanRenderManager::EndCurRenderStep() {
 
 	// A pass whose first draw has replaced everything it ever touches: what was there needn't be read in. On a tiler that's the pass's whole area,
 	// from memory into the tile buffers.
-	if (overwrittenValid_ && curRenderStep_->render.colorLoad == VKRRenderPassLoadAction::KEEP && !curRenderArea_.Empty() && curWidth_ > 32 && curHeight_ > 32 &&
-		curRenderArea_.x1 >= overwritten_.x1 && curRenderArea_.y1 >= overwritten_.y1 && curRenderArea_.x2 <= overwritten_.x2 && curRenderArea_.y2 <= overwritten_.y2) {
-		curRenderStep_->render.colorLoad = VKRRenderPassLoadAction::DONT_CARE;
+	// Deadstation Portable: and so with depth and stencil, and with a run of leading draws (strips: LEGO Indiana Jones clears its
+	// 1024x832 scene in 16 and copies it to the screen in 18; the loads were 8.8 MB a frame).
+	if (!curRenderArea_.Empty() && curWidth_ > 32 && curHeight_ > 32) {
+		VKRRenderPassLoadAction *loads[3] = { &curRenderStep_->render.colorLoad, &curRenderStep_->render.depthLoad, &curRenderStep_->render.stencilLoad };
+		for (int i = 0; i < 3; i++) {
+			if (*loads[i] == VKRRenderPassLoadAction::KEEP && overwritten_[i].Covers(curRenderArea_))
+				*loads[i] = VKRRenderPassLoadAction::DONT_CARE;
+		}
 	}
-	overwrittenValid_ = false;
+	for (Coverage &c : overwritten_)
+		c.Reset();
+	overwritingDraws_ = 0;
 
 	RPKey key{
 		curRenderStep_->render.colorLoad, curRenderStep_->render.depthLoad, curRenderStep_->render.stencilLoad,
