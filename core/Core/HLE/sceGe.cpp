@@ -40,6 +40,7 @@
 #include "GPU/GPUState.h"
 #include "GPU/GPUCommon.h"
 #include "GPU/GeThread.h"
+#include "Common/Math/SIMDHeaders.h"
 
 static const int LIST_ID_MAGIC = 0x35000000;
 
@@ -523,7 +524,32 @@ static bool __GeQuietCommands(StallWalk &walk, u32 from, u32 to) {
 		return false;
 	};
 	u32 pc = from;
+#if PPSSPP_ARCH(ARM64_NEON)
+	// Deadstation Portable: four ordinary words at a time where that changes nothing: the loop below did ~35 instructions for
+	// each (the budget, every address check, the switch), and most words are ordinary. Only when the budget has four left,
+	// all four are in main RAM's window (valid, not video memory) and, at depth 0, the stall isn't among them (to - pc >= 16
+	// unsigned, as the loop stops only at pc == to there); and only if none is a command the loop acts on (JUMP to BASE, which
+	// takes in 0x0D too, ORIGIN, OFFSETADDR, TRANSFERSTART: a superset, the rest goes word by word as before). Then the loop
+	// would have taken each, budget and all, to the same place.
+	const uint32x4_t cmd8 = vdupq_n_u32(GE_CMD_JUMP), span = vdupq_n_u32(GE_CMD_BASE - GE_CMD_JUMP);
+	const uint32x4_t cmdOffsetAddr = vdupq_n_u32(GE_CMD_OFFSETADDR), cmdOrigin = vdupq_n_u32(GE_CMD_ORIGIN);
+	const uint32x4_t cmdTransfer = vdupq_n_u32(GE_CMD_TRANSFERSTART);
+	static_assert(GE_CMD_JUMP < GE_CMD_BJUMP && GE_CMD_RET < GE_CMD_END && GE_CMD_SIGNAL < GE_CMD_FINISH && GE_CMD_FINISH < GE_CMD_BASE &&
+		GE_CMD_CALL < GE_CMD_RET && GE_CMD_BJUMP < GE_CMD_CALL && GE_CMD_END < GE_CMD_SIGNAL, "JUMP to BASE one range");
+#endif
 	while (depth != 0 || pc != to) {
+#if PPSSPP_ARCH(ARM64_NEON)
+		if (budget >= 4 && (depth != 0 || to - pc >= 16) && (pc & 0x3E000000) == 0x08000000 && ((pc + 12) & 0x3E000000) == 0x08000000) {
+			const uint32x4_t cmds = vshrq_n_u32(vld1q_u32((const u32 *)Memory::GetPointerUnchecked(pc)), 24);
+			const uint32x4_t acted = vorrq_u32(vorrq_u32(vcleq_u32(vsubq_u32(cmds, cmd8), span), vceqq_u32(cmds, cmdOffsetAddr)),
+				vorrq_u32(vceqq_u32(cmds, cmdOrigin), vceqq_u32(cmds, cmdTransfer)));
+			if (vmaxvq_u32(acted) == 0) {
+				pc += 16;
+				budget -= 4;
+				continue;
+			}
+		}
+#endif
 		if (--budget < 0 || !Memory::IsValidAddress(pc) || Memory::IsVRAMAddress(pc))
 			return lost(0x101);
 		const u32 op = Memory::ReadUnchecked_U32(pc);
