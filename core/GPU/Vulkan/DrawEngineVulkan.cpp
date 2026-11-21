@@ -328,6 +328,82 @@ static bool ProjectedTriangleBox(const ProjCorner corners[3], bool clampS, bool 
 	return true;
 }
 
+// Per vertex, for projectedCullFootprint: bits 0-3 the edges it is past for the cull (s low, s high, t low, t high; none if
+// q <= 0), bits 4-9 the planes it is outside for the box (4-7 the clamped s and t ranges, 8 w <= 1e-5, 9 q <= 0).
+enum : u16 { PROJ_PAST = 0xF, PROJ_OUTSIDE = 0x3F0, PROJ_Q_BEHIND = 0x200 };
+
+#if PPSSPP_ARCH(ARM64_NEON)
+// projectedCullFootprint's vertices four at a time, while one is left after them (each load takes 16 bytes from a position: the
+// run's last vertex is left to the scalar loop, so no load reads past the run). Returns how many it did. The operations are
+// the scalar loop's, as clang compiles it: the texture matrix as Vec3ByMatrix43 applies it (fmul, fadd: u = (m0 x + m3 y) +
+// (m6 z + m9)), the cull's tests unfused, the clip position fused (c = fma(m8, z, fma(m0, x, m4 y)) + m12), the box's plane
+// tests fused (fmsub / fnmsub, turned round), the screen position fma(size, (c / w + 1) * 0.5, origin). The matrices and limits
+// sit four to a register and are used by lane (the same multiplies and fused multiply-adds as with each one in a register of
+// its own, which spilled: 21 stack loads a group of four), and each lane's flags are shifted in one after another (no mask constants). S and T: the clamped
+// axes (an axis not clamped has no tests and no bits).
+template <bool S, bool T>
+static int ProjectedVerts4(const u8 *src, int stride, int start, int count, const float *tm, const float *mvp,
+	const float lim[4], const VkViewport &vp, u16 *flags, float (*uvqs)[3], float (*clip)[4], float (*screen)[2]) {
+	const float32x4_t TM0 = vld1q_f32(tm), TM1 = vld1q_f32(tm + 4), TM2 = vld1q_f32(tm + 8);
+	const float32x4_t P0 = vld1q_f32(mvp), P1 = vld1q_f32(mvp + 4), P2 = vld1q_f32(mvp + 8);
+	const float32x4_t M12 = vdupq_n_f32(mvp[12]), M13 = vdupq_n_f32(mvp[13]), M14 = vdupq_n_f32(mvp[14]), M15 = vdupq_n_f32(mvp[15]);
+	const float32x4_t L = vld1q_f32(lim);
+	const float32x4_t WMIN = vdupq_n_f32(1e-5f);
+	// The texture matrix's last column added as fma(1, m9, a): the product exact, one rounding, the same sum (any NaN still a
+	// NaN, which no output reads), with m9-m11 lanes of a register rather than registers of their own (no spills). ONE is hidden
+	// from the compiler, which would turn the fma back into an add of m9 on its own. (The clip's m12-m15 stay adds: an fma's
+	// longer latency there delays the divides.)
+	float32x4_t ONE = vdupq_n_f32(1.0f);
+	__asm__("" : "+w"(ONE));
+	const float vpk[4] = { vp.width, vp.height, 0.5f, 0.0f };
+	const float32x4_t VPK = vld1q_f32(vpk), OX = vdupq_n_f32(vp.x), OY = vdupq_n_f32(vp.y);
+	const uint32x4_t NONE = vdupq_n_u32(0), PASTBITS = vdupq_n_u32((u32)PROJ_PAST << 16);
+	int k = 0;
+	for (; k + 4 < count; k += 4) {
+		const int i = start + k;
+		const float32x4_t r0 = vld1q_f32((const float *)(src + (k + 0) * stride));
+		const float32x4_t r1 = vld1q_f32((const float *)(src + (k + 1) * stride));
+		const float32x4_t r2 = vld1q_f32((const float *)(src + (k + 2) * stride));
+		const float32x4_t r3 = vld1q_f32((const float *)(src + (k + 3) * stride));
+		const float32x4_t q0 = vtrn1q_f32(r0, r1), q1 = vtrn2q_f32(r0, r1), q2 = vtrn1q_f32(r2, r3), q3 = vtrn2q_f32(r2, r3);
+		const float32x4_t x = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(q0), vreinterpretq_f64_f32(q2)));
+		const float32x4_t y = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(q1), vreinterpretq_f64_f32(q3)));
+		const float32x4_t z = vreinterpretq_f32_f64(vzip2q_f64(vreinterpretq_f64_f32(q0), vreinterpretq_f64_f32(q2)));
+		float32x4x3_t uvq;
+		uvq.val[0] = vaddq_f32(vaddq_f32(vmulq_laneq_f32(x, TM0, 0), vmulq_laneq_f32(y, TM0, 3)), vfmaq_laneq_f32(vmulq_laneq_f32(z, TM1, 2), ONE, TM2, 1));
+		uvq.val[1] = vaddq_f32(vaddq_f32(vmulq_laneq_f32(x, TM0, 1), vmulq_laneq_f32(y, TM1, 0)), vfmaq_laneq_f32(vmulq_laneq_f32(z, TM1, 3), ONE, TM2, 2));
+		uvq.val[2] = vaddq_f32(vaddq_f32(vmulq_laneq_f32(x, TM0, 2), vmulq_laneq_f32(y, TM1, 1)), vfmaq_laneq_f32(vmulq_laneq_f32(z, TM2, 0), ONE, TM2, 3));
+		vst3q_f32(uvqs[i], uvq);
+		const float32x4_t u = uvq.val[0], v = uvq.val[1], q = uvq.val[2];
+		float32x4x4_t c;
+		c.val[0] = vaddq_f32(vfmaq_laneq_f32(vfmaq_laneq_f32(vmulq_laneq_f32(y, P1, 0), x, P0, 0), z, P2, 0), M12);
+		c.val[1] = vaddq_f32(vfmaq_laneq_f32(vfmaq_laneq_f32(vmulq_laneq_f32(y, P1, 1), x, P0, 1), z, P2, 1), M13);
+		c.val[2] = vaddq_f32(vfmaq_laneq_f32(vfmaq_laneq_f32(vmulq_laneq_f32(y, P1, 2), x, P0, 2), z, P2, 2), M14);
+		c.val[3] = vaddq_f32(vfmaq_laneq_f32(vfmaq_laneq_f32(vmulq_laneq_f32(y, P1, 3), x, P0, 3), z, P2, 3), M15);
+		vst4q_f32(clip[i], c);
+		// the flags, highest first: shifted in at bits 25 down to 16, then narrowed (bits 9-0)
+		uint32x4_t f = vshrq_n_u32(vclezq_f32(q), 6);                                   // 9: q <= 0
+		f = vsriq_n_u32(f, vcltq_f32(c.val[3], WMIN), 7);                                // 8: w < 1e-5
+		f = vsriq_n_u32(f, T ? vcgtzq_f32(vfmsq_laneq_f32(v, q, L, 3)) : NONE, 8);       // 7: v - tHi q > 0
+		f = vsriq_n_u32(f, T ? vcltzq_f32(vfmsq_laneq_f32(v, q, L, 2)) : NONE, 9);       // 6: v - tLo q < 0
+		f = vsriq_n_u32(f, S ? vcgtzq_f32(vfmsq_laneq_f32(u, q, L, 1)) : NONE, 10);      // 5: u - sHi q > 0
+		f = vsriq_n_u32(f, S ? vcltzq_f32(vfmsq_laneq_f32(u, q, L, 0)) : NONE, 11);      // 4: u - sLo q < 0
+		f = vsriq_n_u32(f, T ? vcgtq_f32(v, vmulq_laneq_f32(q, L, 3)) : NONE, 12);       // 3: v > tHi q
+		f = vsriq_n_u32(f, T ? vcltq_f32(v, vmulq_laneq_f32(q, L, 2)) : NONE, 13);       // 2: v < tLo q
+		f = vsriq_n_u32(f, S ? vcgtq_f32(u, vmulq_laneq_f32(q, L, 1)) : NONE, 14);       // 1: u > sHi q
+		f = vsriq_n_u32(f, S ? vcltq_f32(u, vmulq_laneq_f32(q, L, 0)) : NONE, 15);       // 0: u < sLo q
+		f = vbicq_u32(f, vbicq_u32(PASTBITS, vcgtzq_f32(q)));                            // bits 0-3 only where q > 0
+		vst1_u16(flags + i, vshrn_n_u32(f, 16));
+		// the screen position (read only where w > 1e-5: the other lanes' values are never used)
+		float32x4x2_t xy;
+		xy.val[0] = vfmaq_laneq_f32(OX, vmulq_laneq_f32(vaddq_f32(vdivq_f32(c.val[0], c.val[3]), ONE), VPK, 2), VPK, 0);
+		xy.val[1] = vfmaq_laneq_f32(OY, vmulq_laneq_f32(vaddq_f32(vdivq_f32(c.val[1], c.val[3]), ONE), VPK, 2), VPK, 1);
+		vst2q_f32(screen[i], xy);
+	}
+	return k;
+}
+#endif
+
 // Deadstation Portable: a texture projected by the texture matrix from the model-space position, clamped in s or t (see
 // projectedCullable): in one pass over the vertices and one over the triangles, the triangles whose every pixel reads only the
 // texture's edge are dropped from decIndex_ (indexCount becomes what's left), and box is the screen box of the pixels of the
@@ -341,14 +417,11 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 	const float sLo = 0.5f / (float)gstate.getTextureWidth(0), sHi = 1.0f - sLo;
 	const float tLo = 0.5f / (float)gstate.getTextureHeight(0), tHi = 1.0f - tLo;
 	const bool clampS = gstate.isTexCoordClampedS(), clampT = gstate.isTexCoordClampedT();
-	// per vertex: the edges it is past for the cull (bit 0 s low, 1 s high, 2 t low, 3 t high; 0 if q <= 0), and for the box the
-	// planes it is outside (bits 0-3 the clamped s and t ranges, 4 w <= 0, 32 q <= 0), its texture coordinates, clip and screen
-	// positions
-	static u8 past[65536];
-	static u8 outside[65536];
-	static float uvqs[65536][3];
-	static float clip[65536][4];
-	static float screen[65536][2];
+	// per vertex: its flags (PROJ_PAST, PROJ_OUTSIDE), texture coordinates, clip and screen positions
+	alignas(16) static u16 flags[65536];
+	alignas(16) static float uvqs[65536][3];
+	alignas(16) static float clip[65536][4];
+	alignas(16) static float screen[65536][2];
 	const int verts = std::min(numDecodedVerts_, 65536);
 	// The positions, in runs: the decoded vertices (decoded_), or the game's own float positions where Flush decoded straight into
 	// the GPU's buffer (projFromSource_: the same bytes the decoder copies), a run per deferred draw
@@ -365,23 +438,8 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 		runs[numRuns++] = { decoded_ + fmt.posoff, (int)fmt.stride, 0, verts };
 	}
 #if PPSSPP_ARCH(ARM64_NEON)
-	// the texture matrix as Vec3ByMatrix43 applies it (fmul, fadd: u = (m0 x + m3 y) + (m6 z + m9)), the cull's tests unfused;
-	// the clip position fused (c = fma(m8, z, fma(m0, x, m4 y)) + m12), the box's plane tests fused (fmsub / fnmsub, turned
-	// round), the screen position fma(size, (c / w + 1) * 0.5, origin): clang's operations for the scalar passes
-	const float *tm = gstate.tgenMatrix;
-	const float32x4_t t0m = vdupq_n_f32(tm[0]), t1m = vdupq_n_f32(tm[1]), t2m = vdupq_n_f32(tm[2]);
-	const float32x4_t t3m = vdupq_n_f32(tm[3]), t4m = vdupq_n_f32(tm[4]), t5m = vdupq_n_f32(tm[5]);
-	const float32x4_t t6m = vdupq_n_f32(tm[6]), t7m = vdupq_n_f32(tm[7]), t8m = vdupq_n_f32(tm[8]);
-	const float32x4_t t9m = vdupq_n_f32(tm[9]), t10m = vdupq_n_f32(tm[10]), t11m = vdupq_n_f32(tm[11]);
-	float32x4_t m[16];
-	for (int k = 0; k < 16; k++)
-		m[k] = vdupq_n_f32(ub.mvp[k]);
-	const float32x4_t vsLo = vdupq_n_f32(sLo), vsHi = vdupq_n_f32(sHi), vtLo = vdupq_n_f32(tLo), vtHi = vdupq_n_f32(tHi);
-	const uint32x4_t b1 = vdupq_n_u32(clampS ? 1 : 0), b2 = vdupq_n_u32(clampS ? 2 : 0);
-	const uint32x4_t b4 = vdupq_n_u32(clampT ? 4 : 0), b8 = vdupq_n_u32(clampT ? 8 : 0);
-	const uint32x4_t b16 = vdupq_n_u32(16), b32 = vdupq_n_u32(32);
-	const float32x4_t zero = vdupq_n_f32(0.0f), wMin = vdupq_n_f32(1e-5f), one = vdupq_n_f32(1.0f), half = vdupq_n_f32(0.5f);
-	const float32x4_t ox = vdupq_n_f32(vp.x), oy = vdupq_n_f32(vp.y), sw = vdupq_n_f32(vp.width), sh = vdupq_n_f32(vp.height);
+	const float lim[4] = { sLo, sHi, tLo, tHi };
+	auto verts4 = clampS && clampT ? ProjectedVerts4<true, true> : clampS ? ProjectedVerts4<true, false> : ProjectedVerts4<false, true>;
 #endif
 	for (int r = 0; r < numRuns; r++) {
 		const u8 *src = runs[r].src;
@@ -390,50 +448,7 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 		const int count = std::min(runs[r].count, verts - start);
 		int k = 0;
 #if PPSSPP_ARCH(ARM64_NEON)
-		// each load takes 16 bytes from a position: the run's last vertex is left to the scalar loop, so no load reads past the run
-		for (; k + 4 < count; k += 4) {
-			const int i = start + k;
-			const float32x4_t r0 = vld1q_f32((const float *)(src + (k + 0) * stride));
-			const float32x4_t r1 = vld1q_f32((const float *)(src + (k + 1) * stride));
-			const float32x4_t r2 = vld1q_f32((const float *)(src + (k + 2) * stride));
-			const float32x4_t r3 = vld1q_f32((const float *)(src + (k + 3) * stride));
-			const float32x4_t q0 = vtrn1q_f32(r0, r1), q1 = vtrn2q_f32(r0, r1), q2 = vtrn1q_f32(r2, r3), q3 = vtrn2q_f32(r2, r3);
-			const float32x4_t x = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(q0), vreinterpretq_f64_f32(q2)));
-			const float32x4_t y = vreinterpretq_f32_f64(vzip1q_f64(vreinterpretq_f64_f32(q1), vreinterpretq_f64_f32(q3)));
-			const float32x4_t z = vreinterpretq_f32_f64(vzip2q_f64(vreinterpretq_f64_f32(q0), vreinterpretq_f64_f32(q2)));
-			float32x4x3_t uvq;
-			uvq.val[0] = vaddq_f32(vaddq_f32(vmulq_f32(t0m, x), vmulq_f32(t3m, y)), vaddq_f32(vmulq_f32(t6m, z), t9m));
-			uvq.val[1] = vaddq_f32(vaddq_f32(vmulq_f32(t1m, x), vmulq_f32(t4m, y)), vaddq_f32(vmulq_f32(t7m, z), t10m));
-			uvq.val[2] = vaddq_f32(vaddq_f32(vmulq_f32(t2m, x), vmulq_f32(t5m, y)), vaddq_f32(vmulq_f32(t8m, z), t11m));
-			vst3q_f32(uvqs[i], uvq);
-			const float32x4_t u = uvq.val[0], v = uvq.val[1], q = uvq.val[2];
-			// the cull's edges
-			uint32x4_t pb = vandq_u32(vcltq_f32(u, vmulq_f32(vsLo, q)), b1);
-			pb = vorrq_u32(pb, vandq_u32(vcgtq_f32(u, vmulq_f32(vsHi, q)), b2));
-			pb = vorrq_u32(pb, vandq_u32(vcltq_f32(v, vmulq_f32(vtLo, q)), b4));
-			pb = vorrq_u32(pb, vandq_u32(vcgtq_f32(v, vmulq_f32(vtHi, q)), b8));
-			pb = vandq_u32(pb, vcgtq_f32(q, zero));
-			const uint8x8_t pn = vmovn_u16(vcombine_u16(vmovn_u32(pb), vdup_n_u16(0)));
-			memcpy(past + i, &pn, 4);
-			// the box's planes
-			float32x4x4_t c;
-			for (int row = 0; row < 4; row++)
-				c.val[row] = vaddq_f32(vfmaq_f32(vfmaq_f32(vmulq_f32(m[4 + row], y), m[row], x), m[8 + row], z), m[12 + row]);
-			vst4q_f32(clip[i], c);
-			uint32x4_t ob = vandq_u32(vcltq_f32(vfmsq_f32(u, vsLo, q), zero), b1);
-			ob = vorrq_u32(ob, vandq_u32(vcgtq_f32(vfmsq_f32(u, vsHi, q), zero), b2));
-			ob = vorrq_u32(ob, vandq_u32(vcltq_f32(vfmsq_f32(v, vtLo, q), zero), b4));
-			ob = vorrq_u32(ob, vandq_u32(vcgtq_f32(vfmsq_f32(v, vtHi, q), zero), b8));
-			ob = vorrq_u32(ob, vandq_u32(vcltq_f32(c.val[3], wMin), b16));
-			ob = vorrq_u32(ob, vandq_u32(vcleq_f32(q, zero), b32));
-			const uint8x8_t on = vmovn_u16(vcombine_u16(vmovn_u32(ob), vdup_n_u16(0)));
-			memcpy(outside + i, &on, 4);
-			// the screen position (read only where w > 1e-5: the other lanes' values are never used)
-			float32x4x2_t xy;
-			xy.val[0] = vfmaq_f32(ox, sw, vmulq_f32(vaddq_f32(vdivq_f32(c.val[0], c.val[3]), one), half));
-			xy.val[1] = vfmaq_f32(oy, sh, vmulq_f32(vaddq_f32(vdivq_f32(c.val[1], c.val[3]), one), half));
-			vst2q_f32(screen[i], xy);
-		}
+		k = verts4(src, stride, start, count, gstate.tgenMatrix, ub.mvp, lim, vp, flags, uvqs, clip, screen);
 #endif
 		for (; k < count; k++) {
 			const int i = start + k;
@@ -451,7 +466,6 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 					pb |= t[1] > tHi * t[2] ? 8 : 0;
 				}
 			}
-			past[i] = pb;
 			float *c = clip[i];
 			for (int row = 0; row < 4; row++)
 				c[row] = fmaf(ub.mvp[8 + row], p[2], fmaf(ub.mvp[row], p[0], ub.mvp[4 + row] * p[1])) + ub.mvp[12 + row];
@@ -466,7 +480,7 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 			}
 			ob |= c[3] < 1e-5f ? 16 : 0;
 			ob |= t[2] <= 0.0f ? 32 : 0;
-			outside[i] = ob;
+			flags[i] = pb | (ob << 4);
 			if ((ob & 16) == 0) {
 				screen[i][0] = fmaf(vp.width, (c[0] / c[3] + 1.0f) * 0.5f, vp.x);
 				screen[i][1] = fmaf(vp.height, (c[1] / c[3] + 1.0f) * 0.5f, vp.y);
@@ -476,39 +490,56 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 	// the triangles: dropped when all three corners are past one edge; the rest kept, and their pixels that read more boxed
 	bool sayable = true;
 	float minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f;
+#if PPSSPP_ARCH(ARM64_NEON)
+	// x and y side by side, each lane as std::min / std::max: (s < min) ? s : min, (max < s) ? s : max, corner by corner
+	float32x2_t mn = vdup_n_f32(1e30f), mx = vdup_n_f32(-1e30f);
+#endif
+	// the indices and their count in locals: stores through a u16 pointer could alias the member and the reference, which the
+	// compiler would otherwise load again after each store
+	u16 *const idx = decIndex_;
+	const int numIndices = indexCount;
 	int kept = 0;
-	for (int i = 0; i + 2 < indexCount; i += 3) {
-		const u16 ia = decIndex_[i], ib = decIndex_[i + 1], ic = decIndex_[i + 2];
+	for (int i = 0; i + 2 < numIndices; i += 3) {
+		const u16 ia = idx[i], ib = idx[i + 1], ic = idx[i + 2];
 		if (ia >= verts || ib >= verts || ic >= verts) {
-			decIndex_[kept++] = ia;
-			decIndex_[kept++] = ib;
-			decIndex_[kept++] = ic;
+			idx[kept++] = ia;
+			idx[kept++] = ib;
+			idx[kept++] = ic;
 			sayable = false;
 			continue;
 		}
-		if ((past[ia] & past[ib] & past[ic]) != 0)
+		const u32 fa = flags[ia], fb = flags[ib], fc = flags[ic];
+		const u32 all = fa & fb & fc, any = fa | fb | fc;
+		if (all & PROJ_PAST)
 			continue;
-		decIndex_[kept++] = ia;
-		decIndex_[kept++] = ib;
-		decIndex_[kept++] = ic;
+		idx[kept++] = ia;
+		idx[kept++] = ib;
+		idx[kept++] = ic;
 		if (!sayable)
 			continue;
-		const u8 oa = outside[ia], ob = outside[ib], oc = outside[ic];
-		if ((oa | ob | oc) & 32) {
+		if (any & PROJ_Q_BEHIND) {
 			sayable = false;
 			continue;
 		}
 		// inside every plane: its corners as they are; all outside one plane: no pixels
-		if ((oa | ob | oc) == 0) {
-			for (const u16 idx : { ia, ib, ic }) {
-				minX = std::min(minX, screen[idx][0]);
-				maxX = std::max(maxX, screen[idx][0]);
-				minY = std::min(minY, screen[idx][1]);
-				maxY = std::max(maxY, screen[idx][1]);
+		if ((any & PROJ_OUTSIDE) == 0) {
+#if PPSSPP_ARCH(ARM64_NEON)
+			for (const u16 corner : { ia, ib, ic }) {
+				const float32x2_t s = vld1_f32(screen[corner]);
+				mn = vbsl_f32(vclt_f32(s, mn), s, mn);
+				mx = vbsl_f32(vclt_f32(mx, s), s, mx);
 			}
+#else
+			for (const u16 corner : { ia, ib, ic }) {
+				minX = std::min(minX, screen[corner][0]);
+				maxX = std::max(maxX, screen[corner][0]);
+				minY = std::min(minY, screen[corner][1]);
+				maxY = std::max(maxY, screen[corner][1]);
+			}
+#endif
 			continue;
 		}
-		if (oa & ob & oc)
+		if (all & PROJ_OUTSIDE)
 			continue;
 		ProjCorner corners[3];
 		const u16 corner[3] = { ia, ib, ic };
@@ -518,12 +549,22 @@ bool DrawEngineVulkan::projectedCullFootprint(int &indexCount, ScissorRect &box)
 			corners[k].v = uvqs[corner[k]][1];
 			corners[k].q = uvqs[corner[k]][2];
 		}
+#if PPSSPP_ARCH(ARM64_NEON)
+		minX = vget_lane_f32(mn, 0), minY = vget_lane_f32(mn, 1), maxX = vget_lane_f32(mx, 0), maxY = vget_lane_f32(mx, 1);
+#endif
 		if (!ProjectedTriangleBox(corners, clampS, clampT, sLo, sHi, tLo, tHi, vp, minX, minY, maxX, maxY))
 			sayable = false;
+#if PPSSPP_ARCH(ARM64_NEON)
+		mn = vset_lane_f32(minY, vdup_n_f32(minX), 1);
+		mx = vset_lane_f32(maxY, vdup_n_f32(maxX), 1);
+#endif
 	}
 	indexCount = kept;
 	if (!sayable)
 		return false;
+#if PPSSPP_ARCH(ARM64_NEON)
+	minX = vget_lane_f32(mn, 0), minY = vget_lane_f32(mn, 1), maxX = vget_lane_f32(mx, 0), maxY = vget_lane_f32(mx, 1);
+#endif
 	const ScissorRect &cur = dynState_.scissor;
 	int x1 = std::max((int)cur.x, (int)floorf(minX) - 2), y1 = std::max((int)cur.y, (int)floorf(minY) - 2);
 	int x2 = std::min((int)cur.x + (int)cur.width, (int)ceilf(maxX) + 2), y2 = std::min((int)cur.y + (int)cur.height, (int)ceilf(maxY) + 2);
