@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "clock.h"
+#include "log.h"
 
 #include "Core/Config.h"
 #include "GPU/GeThread.h"
@@ -34,18 +35,31 @@ const options::Setting *findSetting(const char *section, const char *key)
 	return nullptr;
 }
 
-int fileValue(const char *section, const char *key, int fallback)
+// a row of Options' pages (options.cpp, and the game's own below) by its section and key: a key no row has is a mistake
+// here, said and stopped
+const options::Setting& row(const char *section, const char *key)
 {
-	const options::Setting *s = findSetting(section, key);
-	return s != nullptr ? options::game().get(*s) : fallback;
+	if (const options::Setting *s = findSetting(section, key))
+		return *s;
+	DS_LOG("settings: no row [%s] %s", section, key);
+	std::abort();
 }
+
+// a row's value as the game has it (else the defaults, else the row's own default)
+int fileValue(const char *section, const char *key)
+{
+	return options::game().get(row(section, key));
+}
+
+bool chainsOfOlympus = false;	// the game played has God of War's own rows
 
 }	// namespace
 
 void setGame(const std::string& discId)
 {
 	options::setGame(discId);
-	if (isChainsOfOlympus(discId))
+	chainsOfOlympus = isChainsOfOlympus(discId);
+	if (chainsOfOlympus)
 		options::addGameSettings("Emulator", {
 			{ "game", "FrameRate", "Frame Rate", "The game's frame rate.", { { "30", 30 }, { "60", 60 } }, false, 60 },
 			{ "game", "MotionBlur", "Motion Blur", "The game's blur.", { { "Off", 0 }, { "On", 1 } }, false, 0 },
@@ -54,10 +68,10 @@ void setGame(const std::string& discId)
 
 void apply()
 {
-	g_Config.iLanguage = fileValue("core", "Language", PSP_SYSTEMPARAM_LANGUAGE_ENGLISH);
-	cpufreq::setFixed(fileValue("core", "CpuFreq", 1) != 0);
+	g_Config.iLanguage = fileValue("core", "Language");
+	cpufreq::setFixed(fileValue("core", "CpuFreq") != 0);
 	g_Config.iInternalResolution = resolution();
-	int picture = fileValue("video", "Picture", 0);
+	int picture = fileValue("video", "Picture");
 	// tests: DEADSTATION_PORTABLE_PICTURE=0, 1 or 2, over the files
 	if (const char *test = getenv("DEADSTATION_PORTABLE_PICTURE"); test != nullptr && *test != '\0')
 		picture = atoi(test);
@@ -73,9 +87,9 @@ void apply()
 	g_Config.iFrameSkip = autoSkip ? 3 : 0;
 	// textures sampled as the game asks, as the PSP does
 	g_Config.iTexFiltering = TEX_FILTER_AUTO;
-	// the game's own settings: God of War's Frame Rate (60 unless picked) and Motion Blur (Off unless picked)
-	g_Config.iGodOfWarFrameRate = fileValue("game", "FrameRate", 60) == 30 ? 30 : 60;
-	g_Config.bMotionBlur = fileValue("game", "MotionBlur", 1) != 0;
+	// the game's own settings: God of War's Frame Rate and Motion Blur; any other game plays at 60 with its blur as it draws it
+	g_Config.iGodOfWarFrameRate = chainsOfOlympus && fileValue("game", "FrameRate") == 30 ? 30 : 60;
+	g_Config.bMotionBlur = chainsOfOlympus ? fileValue("game", "MotionBlur") != 0 : true;
 	// tests: DEADSTATION_PORTABLE_GELATE=0 or 1, GE interrupts always exact or always when the GE's thread gets to them, not chosen
 	// by measurement (GPU/GeThread.h)
 	if (const char *late = getenv("DEADSTATION_PORTABLE_GELATE"); late != nullptr && *late != '\0') {
@@ -86,7 +100,7 @@ void apply()
 
 bool showFps()
 {
-	return fileValue("video", "ShowFPS", 0) != 0;
+	return fileValue("video", "ShowFPS") != 0;
 }
 
 int resolution()
@@ -94,7 +108,7 @@ int resolution()
 	// tests: DEADSTATION_PORTABLE_RESOLUTION=1 or 2, over the files
 	if (const char *test = getenv("DEADSTATION_PORTABLE_RESOLUTION"); test != nullptr && *test != '\0')
 		return atoi(test) == 2 ? 2 : 1;
-	return fileValue("video", "Resolution", 1) == 2 ? 2 : 1;
+	return fileValue("video", "Resolution") == 2 ? 2 : 1;
 }
 
 options::Store store()
@@ -104,7 +118,7 @@ options::Store store()
 		game.get,
 		[game](const options::Setting& setting, int v) {
 			game.set(setting, v);
-			pending |= strcmp(setting.key, "Resolution") == 0 ? Resolution : Other;
+			pending |= setting.key == row("video", "Resolution").key ? Resolution : Other;
 		},
 	};
 }
