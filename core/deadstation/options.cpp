@@ -1,5 +1,4 @@
-// Deadstation Portable's settings, as Options shows them (ui/src/options.h): built into the shared UI as
-// DEADUI_OPTIONS_SOURCE.
+// Deadstation Portable's settings, as Options shows them (ui/src/options.h).
 #include "options.h"
 
 namespace deadui::options
