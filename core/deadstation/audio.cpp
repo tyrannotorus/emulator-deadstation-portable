@@ -27,7 +27,20 @@ std::atomic<uint64_t> written { 0 };
 std::atomic<uint64_t> readFrames { 0 };
 std::atomic<uint32_t> underruns { 0 };
 std::atomic<uint32_t> dropped { 0 };
+std::atomic<uint32_t> loudest { 0 };
 std::atomic<bool> playing { false };
+
+// clamped to 16 bits; returns the loudest sample
+int narrow(int16_t *to, const int32_t *from, uint32_t samples, int peak)
+{
+	for (uint32_t i = 0; i < samples; i++)
+	{
+		const int s = std::clamp(from[i], -32768, 32767);
+		to[i] = (int16_t)s;
+		peak = std::max(peak, s < 0 ? -s : s);
+	}
+	return peak;
+}
 
 void callback(void *, Uint8 *stream, int bytes)
 {
@@ -120,9 +133,14 @@ uint32_t level()
 	return (uint32_t)(written.load() - readFrames.load());
 }
 
+uint32_t takeLoudest()
+{
+	return loudest.exchange(0);
 }
 
-void System_AudioPushSamples(const int32_t *audio, int numSamples, float volume)
+}
+
+void System_AudioPushSamples(const int32_t *audio, int numSamples)
 {
 	using namespace deadstation::audio;
 	uint64_t w = written.load(std::memory_order_relaxed);
@@ -134,13 +152,15 @@ void System_AudioPushSamples(const int32_t *audio, int numSamples, float volume)
 		dropped.fetch_add(count - room, std::memory_order_relaxed);
 		count = room;
 	}
-	for (uint32_t i = 0; i < count; i++, w++)
-	{
-		const uint32_t at = (uint32_t)(w % RingFrames) * 2;
-		ring[at] = (int16_t)std::clamp((int)((float)audio[i * 2] * volume), -32768, 32767);
-		ring[at + 1] = (int16_t)std::clamp((int)((float)audio[i * 2 + 1] * volume), -32768, 32767);
-	}
+	// up to the ring's end, then from its start
+	const uint32_t at = (uint32_t)(w % RingFrames);
+	const uint32_t first = std::min(count, RingFrames - at);
+	int peak = narrow(ring + at * 2, audio, first * 2, 0);
+	peak = narrow(ring, audio + first * 2, (count - first) * 2, peak);
+	w += count;
 	written.store(w, std::memory_order_release);
+	if ((uint32_t)peak > loudest.load(std::memory_order_relaxed))
+		loudest.store((uint32_t)peak, std::memory_order_relaxed);
 	// for Auto frame skip: how much is queued, against where it starts playing
 	__DisplayNoteAudioQueued((float)(w - readFrames.load(std::memory_order_acquire)) / Rate, (float)PlayFrom / Rate);
 }

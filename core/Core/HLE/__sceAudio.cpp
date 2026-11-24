@@ -414,6 +414,6 @@ void __AudioUpdate() {
 	}
 
 	if (g_Config.bEnableSound) {
-		System_AudioPushSamples(mixBuffer, hwBlockSize, Volume100ToMultiplier(std::clamp(g_Config.iGameVolume, 0, VOLUMEHI_FULL)));
+		System_AudioPushSamples(mixBuffer, hwBlockSize);
 	}
 }

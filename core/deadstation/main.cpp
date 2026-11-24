@@ -898,9 +898,9 @@ int main(int argc, char **argv)
 						brickKhz = 0;
 					fclose(f);
 				}
-				DS_LOG("perf: %.1f game frames/s (of %.1f vblanks/s), %.1f shown, %u host frames, worst %.1f ms, sound level %u, %u underruns, %u dropped, %u held, PSP CPU %d MHz, the game made %.1f frames/s, Brick CPU %d MHz",
+				DS_LOG("perf: %.1f game frames/s (of %.1f vblanks/s), %.1f shown, %u host frames, worst %.1f ms, sound level %u, loudest sample %u, %u underruns, %u dropped, %u held, PSP CPU %d MHz, the game made %.1f frames/s, Brick CPU %d MHz",
 						(flips - flipsFrom) / span, (vblanks - vblanksFrom) / span, (double)(shown - shownFrom) / span, perfFrames, runWorst * 1000.0,
-						audio::level(), audio::takeUnderruns(), audio::takeDropped(), (unsigned)(held - heldFrom), CoreTiming::GetClockFrequencyHz() / 1000000,
+						audio::level(), audio::takeLoudest(), audio::takeUnderruns(), audio::takeDropped(), (unsigned)(held - heldFrom), CoreTiming::GetClockFrequencyHz() / 1000000,
 						(gpuStats.numFlips - madeFrom) / span, brickKhz / 1000);
 				madeFrom = gpuStats.numFlips;
 				heldFrom = held;

@@ -36,23 +36,10 @@ struct ConfigBlock {
 constexpr int PSP_MODEL_FAT = 0;
 constexpr int PSP_MODEL_SLIM = 1;
 constexpr int PSP_DEFAULT_FIRMWARE = 660;
-constexpr int VOLUME_OFF = 0;
-constexpr int VOLUME_FULL = 10;
-constexpr int VOLUMEHI_FULL = 100;  // for newer volume params. will convert them all later
 constexpr int AUDIOSAMPLES_MIN = 0;
 constexpr int AUDIOSAMPLES_MAX = 2048;
 constexpr float NO_DEFAULT_FLOAT = -1000000.0f;
 constexpr int NO_DEFAULT_INT = -1000000;
-
-// This matches exactly the old shift-based curve.
-float Volume10ToMultiplier(int volume);
-
-// NOTE: This is used for new volume parameters.
-// It uses a more intuitive-feeling curve.
-float Volume100ToMultiplier(int volume);
-
-// Used for migration from the old settings.
-int MultiplierToVolume100(float multiplier);
 
 float UIScaleFactorToMultiplier(int factor);
 

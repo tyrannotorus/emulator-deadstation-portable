@@ -73,8 +73,6 @@ struct Config {
 
 	// Sound
 	bool bEnableSound = true;
-	int iGameVolume = VOLUME_FULL;
-	int iReverbVolume = VOLUME_FULL;
 
 	// The PSP
 	int iPSPModel = PSP_MODEL_SLIM;

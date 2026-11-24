@@ -19,7 +19,6 @@
 #include <cstring>
 
 #include "Common/Math/math_util.h"
-#include "Core/Config.h"
 #include "Core/HW/SasReverb.h"
 #include "Core/Util/AudioFormat.h"
 
@@ -219,17 +218,6 @@ void SasReverb::ProcessReverb(int16_t *output, const int16_t *input, size_t inpu
 			output[i * 4 + 3] = clamp_s16((int)input[i * 2 + 1] * volRight >> 15);
 		}
 		return;
-	}
-
-	const float reverbVolumeMultiplier = Volume100ToMultiplier(g_Config.iReverbVolume);
-	// Standard volume is 10, which pairs with a normal shift of 15.
-	if (reverbVolumeMultiplier <= 0.0f) {
-		// Force to zero output, which is not the same as "Off."
-		memset(output, 0, inputSize * 4 * sizeof(int16_t));
-		return;
-	} else {
-		volLeft *= reverbVolumeMultiplier;
-		volRight *= reverbVolumeMultiplier;
 	}
 
 	const SasReverbData &d = presets[preset_];
